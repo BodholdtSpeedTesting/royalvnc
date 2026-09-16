@@ -44,7 +44,35 @@ public final class VNCConnection: NSObjectOrAnyObject {
     
     public let framebufferAllocator: VNCFramebufferAllocator?
 
+#if canImport(Network)
+	/// Supplies the transport this connection runs RFB over.
+	///
+	/// When `nil` (the default) the connection dials `settings.hostname` and
+	/// `settings.port` itself, exactly as it always has.
+	///
+	/// When set, the returned connection is used as-is. It may be either not yet
+	/// started, in which case this connection starts it, or already established,
+	/// in which case this connection adopts it rather than starting it again.
+	///
+	/// That second form is the point of this hook. It lets an embedder complete a
+	/// preamble the RFB handshake knows nothing about, such as an UltraVNC
+	/// repeater exchange or a tunnel, or supply a socket it accepted from an
+	/// `NWListener` for a reverse connection, and only then hand it over.
+	///
+	/// Must be set before `connect()`. Setting it afterwards traps, because by
+	/// then the transport has already been created and the provider would be
+	/// silently ignored.
+	public var transportProvider: ((_ host: String, _ port: UInt16) -> NWConnection)? {
+		didSet {
+			precondition(!hasCreatedConnection,
+						 "transportProvider must be set before connect()")
+		}
+	}
+#endif
+
 	// MARK: - Private Properties
+	private var hasCreatedConnection = false
+
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)
 
@@ -71,13 +99,16 @@ public final class VNCConnection: NSObjectOrAnyObject {
     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
 
     lazy var connection: some NetworkConnection = {
+        hasCreatedConnection = true
+
         let connectionSettings = NetworkConnectionSettings(connectionTimeout: 15,
                                                            host: settings.hostname,
                                                            port: settings.port)
 
         // NOTE: To test SocketNetworkConnection on Darwin (macOS, iOS, etc.), comment out the the #if
 #if canImport(Network)
-        let connection = NWConnection(settings: connectionSettings)
+        let connection = transportProvider?(settings.hostname, settings.port)
+            ?? NWConnection(settings: connectionSettings)
 #else
 		let connection = SocketNetworkConnection(settings: connectionSettings)
 #endif
@@ -282,7 +313,30 @@ extension VNCConnection {
 	func beginConnecting() {
 		updateConnectionState(.connecting)
 
-		connection.start(queue: queue)
+		// A transport handed over by `transportProvider` may already be
+		// established, because the embedder had to talk on it first.
+		// Network.framework does not replay `.ready` to a status handler
+		// installed after the fact, so such a transport is adopted here rather
+		// than started a second time, which would be a programmer error.
+		switch connection.status {
+			case .ready:
+				connectionStatusDidChange(.ready)
+
+			case .preparing, .waiting:
+				// Already in flight; the handler installed when the transport was
+				// created will deliver the outcome.
+				break
+
+			case .failed, .cancelled:
+				// Dead on arrival. Route it through the normal failure funnel.
+				connectionStatusDidChange(connection.status)
+
+			case .setup, .unknown:
+				// NWConnection reports `.setup` before it is started;
+				// SocketNetworkConnection reports `.unknown`. Both mean "not
+				// started yet", which is the default, no-provider path.
+				connection.start(queue: queue)
+		}
 	}
 
 	func beginDisconnecting(error: Error? = nil) {

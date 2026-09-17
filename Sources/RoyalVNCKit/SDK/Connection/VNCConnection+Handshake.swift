@@ -57,7 +57,50 @@ private extension VNCConnection {
 																 underlyingError: error)
 		}
 
-		try await receiveNumberOfSecurityTypes()
+		// RFC 6143 7.1.2 splits here. From 3.7 the server offers a list and the
+		// client picks one; in 3.3 the server has already decided and sends a
+		// single 32-bit word. Reading a 3.3 handshake with the 3.7 path consumes
+		// the high byte of that word — always zero — and reports that the server
+		// offered no security types at all, which is how a 3.3 server looked
+		// before this.
+		if state.agreedProtocolVersion?.is3Point3 == true {
+			try await receiveServerChosenSecurityType()
+		} else {
+			try await receiveNumberOfSecurityTypes()
+		}
+	}
+
+	/// The RFB 3.3 security handshake, in which the client does not get a say.
+	func receiveServerChosenSecurityType() async throws {
+		let chosen: VNCProtocol.ServerChosenSecurityType
+
+		do {
+			chosen = try await VNCProtocol.ServerChosenSecurityType.receive(connection: connection)
+		} catch {
+			throw VNCError.ConnectionError.closedDuringHandshake(handshakingPhase: "Receive Server Chosen Security Type",
+																 underlyingError: error)
+		}
+
+		logger.logDebug("Received Server Chosen Security Type: \(chosen.value)")
+
+		// Zero means the server refused outright and is about to say why. On 3.3
+		// that reason is the only thing it will ever tell the user.
+		guard chosen.value != 0 else {
+			let reason = try? await VNCProtocol.ServerChosenSecurityType.receiveFailureReason(connection: connection)
+
+			throw VNCError.authentication(.serverOfferedNoAuthTypes(reason: reason))
+		}
+
+		guard let securityType = chosen.securityType,
+			  securityType != .invalid else {
+			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
+		}
+
+		// `announceChoice: false`: the client never sends a security type in 3.3,
+		// and sending one would put a stray byte in front of the authentication
+		// exchange — which the server would read as the first byte of a challenge
+		// response.
+		try await sendAuthenticationData(securityType: securityType, announceChoice: false)
 	}
 
 	func receiveNumberOfSecurityTypes() async throws {
@@ -140,7 +183,16 @@ private extension VNCConnection {
 		try await sendAuthenticationData(securityType: chosenSecurityType)
 	}
 
-	func sendAuthenticationData(securityType: VNCProtocol.SecurityType) async throws {
+	func sendAuthenticationData(securityType: VNCProtocol.SecurityType,
+								announceChoice: Bool = true) async throws {
+		guard announceChoice else {
+			logger.logDebug("Server Chose Security Type: \(securityType)")
+
+			try await performAuthentication(securityType: securityType)
+
+			return
+		}
+
 		do {
 			try await VNCProtocol.SecurityTypes.send(connection: connection,
 													 securityType: securityType.rawValue)
@@ -150,6 +202,12 @@ private extension VNCConnection {
 		}
 
 		logger.logDebug("Sent Security Type: \(securityType)")
+
+		try await performAuthentication(securityType: securityType)
+	}
+
+	/// Everything after the security type is settled, which 3.3 and 3.7 share.
+	func performAuthentication(securityType: VNCProtocol.SecurityType) async throws {
 
 		let shouldRequestSecurityTypeResult: Bool
 

@@ -132,6 +132,10 @@ extension VNCProtocol.ProtocolVersion {
 		try await connection.write(data: data)
 	}
 
+	var is3Point3: Bool {
+		majorVersion == 3 && minorVersion == 3
+	}
+
 	var is3Point8OrHigher: Bool {
 		let isIt = (majorVersion > 3) ||
 			(majorVersion == 3 && minorVersion >= 8)

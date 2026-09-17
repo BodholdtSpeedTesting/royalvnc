@@ -44,31 +44,33 @@ public final class VNCConnection: NSObjectOrAnyObject {
     
     public let framebufferAllocator: VNCFramebufferAllocator?
 
-#if canImport(Network)
 	/// Supplies the transport this connection runs RFB over.
 	///
 	/// When `nil` (the default) the connection dials `settings.hostname` and
 	/// `settings.port` itself, exactly as it always has.
 	///
-	/// When set, the returned connection is used as-is. It may be either not yet
+	/// When set, the returned transport is used as-is. It may be either not yet
 	/// started, in which case this connection starts it, or already established,
 	/// in which case this connection adopts it rather than starting it again.
 	///
 	/// That second form is the point of this hook. It lets an embedder complete a
-	/// preamble the RFB handshake knows nothing about, such as an UltraVNC
-	/// repeater exchange or a tunnel, or supply a socket it accepted from an
-	/// `NWListener` for a reverse connection, and only then hand it over.
+	/// preamble the RFB handshake knows nothing about — a repeater exchange, say —
+	/// and only then hand the stream over.
+	///
+	/// Typed to ``VNCTransport`` rather than to a concrete connection class,
+	/// because a reverse connection arrives from `accept(2)` as a file descriptor
+	/// and Network.framework has no constructor that takes one. An `NWConnection`
+	/// conforms, so the ordinary case is unchanged.
 	///
 	/// Must be set before `connect()`. Setting it afterwards traps, because by
 	/// then the transport has already been created and the provider would be
 	/// silently ignored.
-	public var transportProvider: ((_ host: String, _ port: UInt16) -> NWConnection)? {
+	public var transportProvider: ((_ host: String, _ port: UInt16) -> any VNCTransport)? {
 		didSet {
 			precondition(!hasCreatedConnection,
 						 "transportProvider must be set before connect()")
 		}
 	}
-#endif
 
 	// MARK: - Private Properties
 	private var hasCreatedConnection = false
@@ -105,13 +107,17 @@ public final class VNCConnection: NSObjectOrAnyObject {
                                                            host: settings.hostname,
                                                            port: settings.port)
 
-        // NOTE: To test SocketNetworkConnection on Darwin (macOS, iOS, etc.), comment out the the #if
-#if canImport(Network)
-        let connection = transportProvider?(settings.hostname, settings.port)
-            ?? NWConnection(settings: connectionSettings)
-#else
-		let connection = SocketNetworkConnection(settings: connectionSettings)
-#endif
+        // Always the same concrete type, whether the transport was supplied or
+        // dialled here. That is what lets this stay an opaque type rather than
+        // an existential, which would otherwise ripple through every file that
+        // takes a connection as a generic constraint.
+        let connection: TransportNetworkConnection
+
+        if let provided = transportProvider?(settings.hostname, settings.port) {
+            connection = TransportNetworkConnection(transport: provided)
+        } else {
+            connection = TransportNetworkConnection(settings: connectionSettings)
+        }
 
         connection.setStatusUpdateHandler(connectionStatusDidChange)
 

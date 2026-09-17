@@ -111,8 +111,23 @@ private extension VNCConnection {
 			chosenSecurityType = .ultraVNCMSLogonII
 		} else if supportedSecurityTypes.contains(.vnc) {
 			chosenSecurityType = .vnc
-		} else if supportedSecurityTypes.contains(.tight) {
-			chosenSecurityType = .tight
+		//
+		// `.tight` is deliberately NOT selectable while its sub-negotiation is
+		// unimplemented (see the commented-out `case .tight:` in
+		// `sendAuthenticationData` below).
+		//
+		// Choosing it desynchronises the stream silently: the client sends the
+		// security type, skips the tunnel and auth-capability exchange Tight
+		// requires, reads the server's 4-byte tunnel count as a SecurityResult,
+		// concludes that authentication succeeded, and sends ClientInit into a
+		// server still waiting for a 4-byte auth code. Both sides then block
+		// until the server gives up, and the client reports "the connection was
+		// closed during Receive Server Init" — which blames the network for a
+		// protocol fault. Observed against a Tight-only stand-in.
+		//
+		// Falling through to `.invalid` instead fails immediately and honestly,
+		// with `clientCouldNotDecideOnSecurityType`. TightVNC and TigerVNC both
+		// ship servers that offer Tight, so this is reachable in practice.
 		} else {
 			chosenSecurityType = .invalid
 		}

@@ -48,19 +48,22 @@ private extension VNCDESEncryption {
 
 	static func paddedKey(_ key: String) -> Data {
 		let maxKeyLength = 8
-		let actualKeyLength = key.count
+
+		// RFC 6143 §7.2.2: the key is eight BYTES of the password, truncated or
+		// null-padded. Bytes, not Characters.
+		//
+		// The previous version compared `key.count`, which counts grapheme
+		// clusters, against an index into `key.withCString`, which walks UTF-8
+		// bytes. For any password with a non-ASCII character in its first eight
+		// bytes that was not merely inaccurate, it crashed: `withCString` yields
+		// `CChar`, so a byte of 0xC3 arrives as -61, and `UInt8.init(-61)` traps.
+		// Verified: "\u{00e9}123" terminated the process with SIGTRAP.
+		let keyBytes = Array(key.utf8.prefix(maxKeyLength))
 
 		var paddedKey = Data(count: maxKeyLength)
 
-		key.withCString { keyPtr in
-			// key is simply password padded with nulls
-			for idx in 0..<maxKeyLength {
-				if idx < actualKeyLength {
-					paddedKey[idx] = .init(keyPtr[idx])
-				} else {
-					paddedKey[idx] = 0
-				}
-			}
+		for idx in 0..<maxKeyLength {
+			paddedKey[idx] = idx < keyBytes.count ? keyBytes[idx] : 0
 		}
 
 		return paddedKey

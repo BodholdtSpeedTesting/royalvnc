@@ -52,43 +52,46 @@ extension VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAgreement 
 		}
 
 		/// (x * y) % m
+		///
+		/// Russian-peasant multiplication, so that the intermediate product
+		/// cannot overflow even when the modulus is large.
 		static func mulM64(x: UInt64,
 						   y: UInt64,
 						   m: UInt64) -> UInt64 {
-			var y = y
+			var x = x
+			var y = y % m
 			var r = UInt64(0)
-			var x = UInt64(0)
 
-			repeat {
-				x>>=1
-
+			while x > 0 {
 				if x & 1 != 0 {
 					r = addM64(x: r, y: y, m: m)
 				}
 
+				x >>= 1
 				y = addM64(x: y, y: y, m: m)
-			} while x > 0
+			}
 
 			return r
 		}
 
-		/// (x ^ y) % m
+		/// (b ^ e) % m
 		static func powM64(b: UInt64,
 						   e: UInt64,
 						   m: UInt64) -> UInt64 {
-			var b = b
-			var r = UInt64(0)
-			var e = UInt64(0)
+			guard m > 1 else { return 0 }
 
-			repeat {
-				e>>=1
+			var b = b % m
+			var e = e
+			var r = UInt64(1)
 
+			while e > 0 {
 				if e & 1 != 0 {
 					r = mulM64(x: r, y: b, m: m)
 				}
 
+				e >>= 1
 				b = mulM64(x: b, y: b, m: m)
-			} while e > 0
+			}
 
 			return r
 		}

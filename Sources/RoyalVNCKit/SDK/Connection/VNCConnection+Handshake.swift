@@ -146,6 +146,23 @@ private extension VNCConnection {
 
 		let supportedSecurityTypes = supportedTypes.securityTypes
 
+		// The embedder's choice comes first, from the types the server actually
+		// offered and that this client can complete. Anything it returns that was
+		// not on that list is ignored rather than attempted: the guard below
+		// would reject it anyway, and failing there would blame the server.
+		if let chooser = securityTypeChooser {
+			let offered = supportedSecurityTypes.compactMap(\.publicSecurityMethod)
+
+			if let preferred = chooser(offered),
+			   offered.contains(preferred) {
+				logger.logDebug("Embedder chose Security Type: \(preferred)")
+
+				try await sendAuthenticationData(securityType: preferred.protocolSecurityType)
+
+				return
+			}
+		}
+
 		if supportedSecurityTypes.contains(.none) {
 			chosenSecurityType = .none
 		} else if supportedSecurityTypes.contains(.diffieHellman) {
@@ -208,6 +225,12 @@ private extension VNCConnection {
 
 	/// Everything after the security type is settled, which 3.3 and 3.7 share.
 	func performAuthentication(securityType: VNCProtocol.SecurityType) async throws {
+		// Recorded here rather than where the choice is made, because this is the
+		// one point every path passes through: 3.7 and 3.8 come from
+		// `decideSecurityType`, 3.3 from the server stating a type the client
+		// never chose, and the embedder's hook from a fourth place again.
+		negotiatedSecurityMethod = securityType.publicSecurityMethod
+
 
 		let shouldRequestSecurityTypeResult: Bool
 

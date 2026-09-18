@@ -101,3 +101,23 @@ extension VNCProtocol.SecurityTypes {
 		})
 	}
 }
+
+extension VNCProtocol.SecurityType {
+	/// The public spelling of this type, or `nil` for one no embedder can act on.
+	///
+	/// Deliberately narrow. The wire enum lists every number anyone has ever
+	/// registered, most of which this client cannot complete; publishing all of
+	/// them would invite an embedder to select one that then fails in the
+	/// handshake.
+	var publicSecurityMethod: VNCSecurityMethod? {
+		.init(rawValue: rawValue)
+	}
+}
+
+extension VNCSecurityMethod {
+	/// The wire enum for this type. Total: every case here has a wire number.
+	var protocolSecurityType: VNCProtocol.SecurityType {
+		// swiftlint:disable:next force_unwrapping
+		.init(rawValue: rawValue)!
+	}
+}

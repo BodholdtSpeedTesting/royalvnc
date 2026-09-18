@@ -65,6 +65,67 @@ public final class VNCConnection: NSObjectOrAnyObject {
 	/// Must be set before `connect()`. Setting it afterwards traps, because by
 	/// then the transport has already been created and the provider would be
 	/// silently ignored.
+	/// Chooses among the security types a server offered, in place of the
+	/// built-in preference order.
+	///
+	/// Given every type the server offered that this client can complete, in the
+	/// order the server listed them. Return the one to use, or `nil` to fall back
+	/// to the built-in order.
+	///
+	/// WHY THIS EXISTS. The built-in order is fixed and global, and it cannot be
+	/// right for every embedder, because the types are not ranked on one axis. A
+	/// server offering both type 2 and type 113 will accept either — but type 2
+	/// authenticates against a VNC password and type 113 against a Windows
+	/// account, and only the embedder knows which credential it is holding.
+	/// Choosing type 113 for an embedder that has only a password makes a
+	/// connection fail that would have worked.
+	///
+	/// The security properties differ too, and not in the direction the numbers
+	/// suggest. See ``VNCSecurityMethod/transmitsPassword``.
+	///
+	/// A returned type that the server did not offer is refused, the same as if
+	/// nothing suitable had been offered at all: this hook picks from what is on
+	/// the table, it does not put anything new on it.
+	///
+	/// Not consulted on RFB 3.3, where the server states the type and the client
+	/// has no say. ``negotiatedSecurityMethod`` reports what happened either way.
+	///
+	/// Must be set before `connect()`.
+	public var securityTypeChooser: (@Sendable (_ offered: [VNCSecurityMethod]) -> VNCSecurityMethod?)? {
+		didSet {
+			precondition(!hasCreatedConnection,
+						 "securityTypeChooser must be set before connect()")
+		}
+	}
+
+	/// The security type this connection actually used, once it is settled.
+	///
+	/// `nil` until the type is agreed. Readable from any thread, and guarded,
+	/// because it is written on the handshake task and read by an embedder that
+	/// is somewhere else entirely — usually the main thread, on being told the
+	/// connection came up.
+	///
+	/// Reported for every path, including RFB 3.3, where the server states the
+	/// type and ``securityTypeChooser`` is never called. An embedder that wants
+	/// to tell a user what protection a session has needs the answer even when it
+	/// had no say in it — especially then.
+	public internal(set) var negotiatedSecurityMethod: VNCSecurityMethod? {
+		get {
+			negotiatedSecurityMethodLock.lock()
+			defer { negotiatedSecurityMethodLock.unlock() }
+
+			return negotiatedSecurityMethodStorage
+		}
+		set {
+			negotiatedSecurityMethodLock.lock()
+			negotiatedSecurityMethodStorage = newValue
+			negotiatedSecurityMethodLock.unlock()
+		}
+	}
+
+	private let negotiatedSecurityMethodLock = NSLock()
+	private var negotiatedSecurityMethodStorage: VNCSecurityMethod?
+
 	public var transportProvider: ((_ host: String, _ port: UInt16) -> any VNCTransport)? {
 		didSet {
 			precondition(!hasCreatedConnection,

@@ -91,6 +91,20 @@ public extension VNCConnection {
 
             updateMouseButtonState(wheel: wheel,
                                    isDown: false)
+
+            // The release, which used to be computed and never sent. RFC 6143
+            // 7.5.5 has no scroll axis: a wheel step *is* "a press and release"
+            // of button 4, 5, 6 or 7, so a PointerEvent carrying the cleared bit
+            // is half the event and not a tidy-up.
+            //
+            // Without it, N steps put N identical masks on the wire. A server
+            // that derives button transitions by diffing against the previous
+            // mask -- the ordinary implementation -- sees one 0-to-1 edge, so
+            // steps 2..N are silently dropped and a three-notch flick scrolls
+            // once. The wheel button is also left logically held until whatever
+            // pointer event the user happens to send next clears it.
+            enqueueMouseEvent(nonNormalizedX: x,
+                              nonNormalizedY: y)
         }
     }
 }

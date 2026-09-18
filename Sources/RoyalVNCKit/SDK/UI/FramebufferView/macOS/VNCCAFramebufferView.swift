@@ -67,9 +67,18 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 			ratio = containerBounds.height / framebufferSize.height
 		}
 
-		// Only allow downscaling, no upscaling
-		guard ratio < 1 else { return 1 }
-
+		// Upscaling allowed, deliberately. Clamping here to 1 was not protecting
+		// sharpness on the displays this runs on: `contentsScale` is 1 on both
+		// the Metal layer and the fallback layer, so a layer whose frame is the
+		// framebuffer size in *points* is already being stretched across twice
+		// as many device pixels on any Retina screen. The clamp bought no
+		// fidelity there; it only left a small remote desktop marooned in the
+		// middle of a large window.
+		//
+		// Both readers of this ratio -- `contentRect`, which lays out the layer,
+		// and `scaledContentRelativePosition`, which maps a click back to
+		// framebuffer coordinates -- take it from here, so enlarging cannot put
+		// the pointer out of step with the picture.
 		return ratio
 	}
 
@@ -813,11 +822,11 @@ private extension VNCCAFramebufferView {
             return
         }
 
-        if frameSizeExceedsFramebufferSize(bounds.size) {
-            layer.contentsGravity = .center
-        } else {
-            layer.contentsGravity = .resizeAspect
-        }
+        // `.resizeAspect` in both directions. The `.center` this used to pick
+        // when the view was larger than the framebuffer was the fallback path's
+        // own refusal to enlarge, and it would have disagreed with `contentRect`
+        // -- and so with where clicks land -- now that `scaleRatio` enlarges.
+        layer.contentsGravity = .resizeAspect
     }
 }
 

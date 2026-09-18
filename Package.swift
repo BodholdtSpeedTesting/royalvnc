@@ -37,9 +37,18 @@ let package = Package(
     ],
 
     products: [
+        // Deliberately not `type: .dynamic`. A dynamic product becomes an
+        // embedded framework in the consuming app, and macOS's hardened
+        // runtime turns on library validation, which requires a loaded
+        // framework to carry the same Team ID as the process. An ad-hoc
+        // signed app has no Team ID, so dyld refuses the framework and the
+        // app dies at launch with "different Team IDs". Linked statically
+        // there is nothing to validate. Measured: with `.dynamic`, a Release
+        // build of RemoteFramebufferClient aborts in dyld before main();
+        // without it, the same build runs with the hardened runtime and the
+        // sandbox both still enforced.
         .library(
             name: "RoyalVNCKit",
-            type: .dynamic,
             targets: [ "RoyalVNCKit" ]
         ),
 

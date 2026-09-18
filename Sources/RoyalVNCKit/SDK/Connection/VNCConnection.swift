@@ -126,6 +126,44 @@ public final class VNCConnection: NSObjectOrAnyObject {
 	private let negotiatedSecurityMethodLock = NSLock()
 	private var negotiatedSecurityMethodStorage: VNCSecurityMethod?
 
+	/// Every security type the server offered, as the raw numbers on the wire.
+	///
+	/// ``negotiatedSecurityMethod`` answers "what did we agree on", and is `nil`
+	/// when nothing was agreed. This answers "what was on the table", which is
+	/// the only thing that can explain a refusal.
+	///
+	/// Raw numbers rather than ``VNCSecurityMethod`` deliberately. The types
+	/// worth reporting in a failure are precisely the ones this client cannot
+	/// complete, and those have no public spelling — `publicSecurityMethod`
+	/// returns `nil` for them, by design. Mapping through it would throw away the
+	/// whole message. A server that offers only 114 and 115 is not offering
+	/// "nothing"; it is offering two things, and an embedder that can name them
+	/// can tell its user why the connection stopped.
+	///
+	/// `UInt32` because that is the wider of the two wire forms and so loses
+	/// nothing: RFC 6143 7.1.2 has the 3.7 and 3.8 list as bytes, but 3.3 states
+	/// a single type as a four-byte word. Narrowing to `UInt8` would mean either
+	/// dropping a 3.3 answer or truncating it into a different, wrong number.
+	///
+	/// Populated on every path, including RFB 3.3, where the server states one
+	/// type and the client has no say.
+	public internal(set) var offeredSecurityTypes: [UInt32] {
+		get {
+			offeredSecurityTypesLock.lock()
+			defer { offeredSecurityTypesLock.unlock() }
+
+			return offeredSecurityTypesStorage
+		}
+		set {
+			offeredSecurityTypesLock.lock()
+			offeredSecurityTypesStorage = newValue
+			offeredSecurityTypesLock.unlock()
+		}
+	}
+
+	private let offeredSecurityTypesLock = NSLock()
+	private var offeredSecurityTypesStorage: [UInt32] = []
+
 	public var transportProvider: ((_ host: String, _ port: UInt16) -> any VNCTransport)? {
 		didSet {
 			precondition(!hasCreatedConnection,

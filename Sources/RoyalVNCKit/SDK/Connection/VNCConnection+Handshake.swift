@@ -83,6 +83,12 @@ private extension VNCConnection {
 
 		logger.logDebug("Received Server Chosen Security Type: \(chosen.value)")
 
+		// One element, because on 3.3 the server states a single type and the
+		// client has no say. An embedder explaining a refusal needs the same
+		// answer here as on 3.7 and 3.8 -- arguably more, since the user could
+		// not have influenced it.
+		offeredSecurityTypes = [chosen.value]
+
 		// Zero means the server refused outright and is about to say why. On 3.3
 		// that reason is the only thing it will ever tell the user.
 		guard chosen.value != 0 else {
@@ -133,6 +139,10 @@ private extension VNCConnection {
 																		number: number)
 
 			logger.logDebug("Received Security Types: \(securityTypes.securityTypes.map({ "\($0)" }))")
+
+			// Recorded before anything is chosen, because the interesting case is
+			// the one where nothing can be.
+			offeredSecurityTypes = securityTypes.authTypes.map(UInt32.init)
 		} catch {
 			throw VNCError.ConnectionError.closedDuringHandshake(handshakingPhase: "Receive Security Types",
 																 underlyingError: error)

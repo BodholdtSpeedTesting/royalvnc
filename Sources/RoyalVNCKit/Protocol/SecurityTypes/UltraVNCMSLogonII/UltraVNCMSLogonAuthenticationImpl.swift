@@ -115,6 +115,18 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.Authentication {
 	static func encryptD3DES(target: UnsafeMutablePointer<UInt8>,
 							 length: Int,
 							 key: UnsafeMutablePointer<UInt8>) {
+		// The whole chain, not each block. `encryptDES` calls `deskey` every
+		// time it is entered, so locking inside it would still let another
+		// thread re-key between this credential's blocks -- which is exactly
+		// the corruption being fixed. See `D3DESKeySchedule`.
+		D3DESKeySchedule.withExclusiveUse {
+			encryptD3DESLocked(target: target, length: length, key: key)
+		}
+	}
+
+	private static func encryptD3DESLocked(target: UnsafeMutablePointer<UInt8>,
+										   length: Int,
+										   key: UnsafeMutablePointer<UInt8>) {
 		for idx in 0..<8 {
 			target[idx] ^= key[idx]
 		}

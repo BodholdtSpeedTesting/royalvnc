@@ -73,12 +73,16 @@ private extension VNCDESEncryption {
 						paddedKeyBytes: UnsafeMutablePointer<UInt8>) {
 		let challengeSize = 16
 
-		deskey(paddedKeyBytes, EN0)
+		// `deskey` and `des` share a global schedule, so they have to be held
+		// together. See `D3DESKeySchedule`.
+		D3DESKeySchedule.withExclusiveUse {
+			deskey(paddedKeyBytes, EN0)
 
-		for challengeIdx in stride(from: 0, to: challengeSize, by: 8) {
-			let bytesAtOffset = dataBytes.advanced(by: challengeIdx)
+			for challengeIdx in stride(from: 0, to: challengeSize, by: 8) {
+				let bytesAtOffset = dataBytes.advanced(by: challengeIdx)
 
-			des(bytesAtOffset, bytesAtOffset)
+				des(bytesAtOffset, bytesAtOffset)
+			}
 		}
 	}
 }

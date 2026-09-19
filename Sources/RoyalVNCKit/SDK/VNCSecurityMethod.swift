@@ -42,6 +42,14 @@ public enum VNCSecurityMethod: UInt8, Sendable, CaseIterable {
 	/// account and sends the user name and password encrypted under a key
 	/// agreed by a 64-bit Diffie-Hellman exchange.
 	case ultraVNCMSLogonII = 113
+
+	/// Type 19. VeNCrypt, which negotiates a subtype and — for every subtype
+	/// this kit will select — wraps everything after the handshake in TLS.
+	///
+	/// The only method here under which the session itself is encrypted. Every
+	/// other one authenticates and then hands the screen, the keystrokes and
+	/// the clipboard to the network in clear text.
+	case veNCrypt = 19
 }
 
 public extension VNCSecurityMethod {
@@ -57,6 +65,12 @@ public extension VNCSecurityMethod {
 			case .vnc: false
 			case .appleRemoteDesktop: true
 			case .ultraVNCMSLogonII: true
+			// Depends on the subtype: X509Vnc needs a password only, X509Plain
+			// needs both, X509None needs neither. Reported as true because the
+			// embedder is asked once, before the subtype is known, and a user
+			// name it does not need is harmless where one it needs and lacks
+			// is not.
+			case .veNCrypt: true
 		}
 	}
 
@@ -77,6 +91,23 @@ public extension VNCSecurityMethod {
 			case .vnc: false
 			case .appleRemoteDesktop: false
 			case .ultraVNCMSLogonII: true
+			// The Plain subtype does send the password, but inside TLS, so an
+			// observer sees ciphertext. This property is about what reaches the
+			// wire in a form worth having, and under VeNCrypt nothing does.
+			case .veNCrypt: false
+		}
+	}
+
+	/// Whether the session itself is encrypted once this type has completed.
+	///
+	/// True only for ``veNCrypt``. RFB is otherwise a clear-text protocol: the
+	/// security types authenticate the client and then step out of the way, so
+	/// the screen, every keystroke and everything copied cross the network
+	/// unprotected however the sign-in went.
+	var encryptsTheSession: Bool {
+		switch self {
+			case .veNCrypt: true
+			default: false
 		}
 	}
 }

@@ -60,7 +60,12 @@ public typealias VNCTransportStateHandler = (_ state: VNCTransportState) -> Void
 /// A transport may be handed over already established, in which case the
 /// connection adopts it rather than starting it again. That is what makes a
 /// preamble possible: complete it, then hand over a live stream.
-public protocol VNCTransport: AnyObject {
+/// `Sendable` because a transport genuinely is used from more than one thread:
+/// the kit reads on the connection's task and writes from the queue that drains
+/// client-to-server messages, and VeNCrypt hands a live transport to an
+/// embedder's async closure to be wrapped in TLS. Conformers already carry
+/// their own locks; this states the contract they were already keeping.
+public protocol VNCTransport: AnyObject, Sendable {
 	/// Whether the transport is established and can carry bytes now.
 	var isTransportReady: Bool { get }
 

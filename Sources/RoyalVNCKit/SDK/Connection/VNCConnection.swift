@@ -164,6 +164,50 @@ public final class VNCConnection: NSObjectOrAnyObject {
 	private let offeredSecurityTypesLock = NSLock()
 	private var offeredSecurityTypesStorage: [UInt32] = []
 
+	/// How many rectangles have arrived under each encoding, by encoding type.
+	///
+	/// A session that is drawing is not necessarily drawing efficiently. The
+	/// client asks for an encoding order in `Settings.frameEncodings`, and
+	/// SetEncodings is a request rather than an instruction: RFC 6143 6.4.2
+	/// lets the server send any encoding the client listed, and a server that
+	/// dislikes the list can fall back to Raw, which every client must accept.
+	/// From outside, that is indistinguishable from success — the screen
+	/// appears, and each frame is simply many times larger than it needed to
+	/// be. On a LAN nobody notices; over a link that matters, it is the whole
+	/// difference.
+	///
+	/// Keyed by the wire's own `Int32` rather than by a Swift enum, so an
+	/// encoding this kit has no case for is still counted rather than lost.
+	public internal(set) var rectanglesByEncoding: [Int32: Int] {
+		get {
+			rectanglesByEncodingLock.lock()
+			defer { rectanglesByEncodingLock.unlock() }
+
+			return rectanglesByEncodingStorage
+		}
+		set {
+			rectanglesByEncodingLock.lock()
+			rectanglesByEncodingStorage = newValue
+			rectanglesByEncodingLock.unlock()
+		}
+	}
+
+	private let rectanglesByEncodingLock = NSLock()
+	private var rectanglesByEncodingStorage: [Int32: Int] = [:]
+
+	/// Counts a batch of rectangles. Called on the connection's own task.
+	func countRectangles(_ rectangles: [VNCProtocol.Rectangle]) {
+		guard !rectangles.isEmpty else { return }
+
+		rectanglesByEncodingLock.lock()
+
+		for rectangle in rectangles {
+			rectanglesByEncodingStorage[rectangle.encodingType, default: 0] += 1
+		}
+
+		rectanglesByEncodingLock.unlock()
+	}
+
 	public var transportProvider: ((_ host: String, _ port: UInt16) -> any VNCTransport)? {
 		didSet {
 			precondition(!hasCreatedConnection,

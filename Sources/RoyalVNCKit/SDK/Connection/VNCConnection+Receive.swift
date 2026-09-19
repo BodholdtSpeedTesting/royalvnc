@@ -74,6 +74,11 @@ private extension VNCConnection {
 
 		logger.logDebug("Received Framebuffer Update: \(framebufferUpdate)")
 
+		// Tallied here rather than in the decode loop, because the decoded
+		// update already carries every rectangle it read and the protocol layer
+		// has no reference to the connection. See `rectanglesByEncoding`.
+		countRectangles(framebufferUpdate.rectangles)
+
 		/*
 		// Write out the framebuffer for testing purposes
 		try framebuffer.writeSurface()

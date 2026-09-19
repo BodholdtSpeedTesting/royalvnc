@@ -177,6 +177,55 @@ public final class VNCConnection: NSObjectOrAnyObject {
 #endif
 	private var offeredSecurityTypesStorage: [UInt32] = []
 
+	/// Wraps the live transport in TLS, for a security type that upgrades
+	/// mid-stream.
+	///
+	/// VeNCrypt (type 19) negotiates in the clear and then runs everything
+	/// afterwards inside TLS. Nothing can dial a TLS connection on its behalf,
+	/// because the bytes that decide whether TLS happens at all have already
+	/// crossed the plain transport.
+	///
+	/// Supplied by the embedder rather than implemented here, deliberately. A
+	/// TLS implementation is a large dependency with a release cadence and a
+	/// vulnerability history of its own, and this kit has neither. Handing the
+	/// decision out keeps that choice — and its updates — with the application.
+	///
+	/// Given the current transport and the host name the connection was made
+	/// to, return a transport that carries the same stream inside TLS. Throwing
+	/// fails the connection, which is the right outcome: a failed TLS handshake
+	/// must not fall back to plaintext.
+	///
+	/// Leaving this `nil` means VeNCrypt's TLS subtypes cannot be completed,
+	/// and the handshake says so rather than attempting them.
+	public var tlsUpgradeProvider: ((_ transport: any VNCTransport,
+									 _ serverHostname: String) async throws -> any VNCTransport)?
+
+	/// The VeNCrypt subtypes the server offered, if it offered any.
+	///
+	/// Recorded for the same reason as ``offeredSecurityTypes``: when nothing on
+	/// offer can be completed, the numbers are the only thing that explains why.
+	public internal(set) var offeredVeNCryptSubtypes: [UInt32] {
+		get {
+			offeredVeNCryptSubtypesLock.lock()
+			defer { offeredVeNCryptSubtypesLock.unlock() }
+
+			return offeredVeNCryptSubtypesStorage
+		}
+		set {
+			offeredVeNCryptSubtypesLock.lock()
+			offeredVeNCryptSubtypesStorage = newValue
+			offeredVeNCryptSubtypesLock.unlock()
+		}
+	}
+
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let offeredVeNCryptSubtypesLock = Spinlock()
+#else
+	private let offeredVeNCryptSubtypesLock = NSLock()
+#endif
+
+	private var offeredVeNCryptSubtypesStorage: [UInt32] = []
+
 	/// How many rectangles have arrived under each encoding, by encoding type.
 	///
 	/// A session that is drawing is not necessarily drawing efficiently. The
@@ -260,7 +309,13 @@ public final class VNCConnection: NSObjectOrAnyObject {
 
     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
 
-    lazy var connection: some NetworkConnection = {
+    // Concrete rather than opaque. It was `some NetworkConnection`, on the
+    // reasoning that an existential would ripple through the files taking a
+    // connection as a generic constraint -- true, but naming the concrete type
+    // avoids that equally well, and an opaque type also hides members that only
+    // this type has. VeNCrypt needs one: the ability to swap the transport
+    // underneath a live connection.
+    lazy var connection: TransportNetworkConnection = {
         hasCreatedConnection = true
 
         let connectionSettings = NetworkConnectionSettings(connectionTimeout: 15,

@@ -228,11 +228,39 @@ final class SocketConnectionTransport: VNCTransport {
 /// to an existential, which would ripple through the forty-odd files that take a
 /// connection as a generic constraint.
 final class TransportNetworkConnection: NetworkConnection {
-	let transport: any VNCTransport
+	/// A `var` so a security type can upgrade the stream in place.
+	///
+	/// VeNCrypt (type 19) negotiates over the plain connection and then wraps
+	/// everything after it in TLS. There is no point at which a TLS connection
+	/// could have been dialled instead: the bytes that decide whether TLS
+	/// happens at all have already crossed this transport.
+	private(set) var transport: any VNCTransport
 
 	init(transport: any VNCTransport) {
 		self.transport = transport
 	}
+
+	/// Puts a new transport in place of the current one, keeping the status
+	/// handler pointed at it.
+	///
+	/// The caller must not have a read or write in flight. In practice the only
+	/// caller is a security type's handshake, which is strictly sequential --
+	/// it has just read an acknowledgement and will not read again until the
+	/// upgrade returns.
+	func replaceTransport(with replacement: any VNCTransport) {
+		let handler = statusUpdateHandler
+
+		transport.setTransportStateHandler(nil)
+		transport = replacement
+
+		// Re-installed rather than left behind: the connection follows the
+		// transport's lifecycle through this, and after a swap it would
+		// otherwise be following a transport nothing writes to.
+		setStatusUpdateHandler(handler)
+	}
+
+	/// Kept so `replaceTransport` can re-install it.
+	private var statusUpdateHandler: NetworkConnectionStatusUpdateHandler?
 
 	/// The default transport for this platform, dialled from `settings`.
 	init(settings: NetworkConnectionSettings) {
@@ -257,6 +285,8 @@ final class TransportNetworkConnection: NetworkConnection {
 	var isReady: Bool { transport.isTransportReady }
 
 	func setStatusUpdateHandler(_ statusUpdateHandler: NetworkConnectionStatusUpdateHandler?) {
+		self.statusUpdateHandler = statusUpdateHandler
+
 		guard let statusUpdateHandler else {
 			transport.setTransportStateHandler(nil)
 

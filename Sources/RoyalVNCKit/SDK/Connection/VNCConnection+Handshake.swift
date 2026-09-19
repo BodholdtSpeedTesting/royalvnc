@@ -173,7 +173,26 @@ private extension VNCConnection {
 			}
 		}
 
-		if supportedSecurityTypes.contains(.none) {
+		// VeNCrypt first, when it can be completed, because it is the only type
+		// here that encrypts anything. Every other option leaves the whole
+		// session -- the screen, the keystrokes, the clipboard -- in the clear.
+		//
+		// THE TRADE-OFF, because this is not free. Choosing a security type is
+		// final: there is no way back to the list once it is sent. So a server
+		// that offers VeNCrypt but whose subtypes are all TLS-prefixed will now
+		// fail, where before it would have connected over VNC authentication in
+		// plaintext. That is a real loss of connectability, and it is the right
+		// side to err on: the TLS-prefixed subtypes require an anonymous key
+		// exchange, so "connecting" to one was never the protection it looked
+		// like, and silently downgrading to plaintext is worse than saying so.
+		//
+		// `offeredVeNCryptSubtypes` is recorded before this can fail, so an
+		// embedder can explain exactly what the server wanted. And an embedder
+		// that would rather connect than be encrypted can say so through
+		// `securityTypeChooser`, which is consulted before this walk.
+		if supportedSecurityTypes.contains(.veNCrypt), tlsUpgradeProvider != nil {
+			chosenSecurityType = .veNCrypt
+		} else if supportedSecurityTypes.contains(.none) {
 			chosenSecurityType = .none
 		} else if supportedSecurityTypes.contains(.diffieHellman) {
 			chosenSecurityType = .diffieHellman
@@ -264,6 +283,10 @@ private extension VNCConnection {
 				shouldRequestSecurityTypeResult = true
 
 				try await performUltraVNCMSLogonIIAuthentication()
+			case .veNCrypt:
+				shouldRequestSecurityTypeResult = true
+
+				try await performVeNCryptAuthentication()
 //			case .tight:
 //				shouldRequestSecurityTypeResult = true
 //				isTightSecurityEnabled = true
@@ -278,6 +301,136 @@ private extension VNCConnection {
 		}
 
 		try await sendClientInit()
+	}
+
+	/// VeNCrypt, security type 19.
+	///
+	/// rfbproto.rst, "VeNCrypt". Not an authentication method: a version
+	/// exchange, then a second list of security types, then optionally TLS, then
+	/// whichever method the chosen subtype names.
+	func performVeNCryptAuthentication() async throws {
+		_ = try await VNCProtocol.VeNCrypt.negotiateVersion(connection: connection,
+															logger: logger)
+
+		// Zero means accepted here. The ack after the subtype means the
+		// opposite; see the note on `VNCProtocol.VeNCrypt`.
+		try await VNCProtocol.VeNCrypt.receiveVersionAck(connection: connection,
+														 logger: logger)
+
+		let offered = try await VNCProtocol.VeNCrypt.receiveSubtypes(connection: connection,
+																	 logger: logger)
+
+		offeredVeNCryptSubtypes = offered
+
+		guard let chosen = chooseVeNCryptSubtype(from: offered) else {
+			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
+		}
+
+		logger.logInfo("VeNCrypt: using subtype \(chosen)")
+
+		try await VNCProtocol.VeNCrypt.send(subtype: chosen.rawValue,
+											connection: connection,
+											logger: logger)
+
+		if chosen.usesTLS {
+			// One means accepted here -- the opposite polarity to the ack above.
+			try await VNCProtocol.VeNCrypt.receiveSubtypeAck(connection: connection,
+															 logger: logger)
+
+			try await upgradeToTLS()
+		}
+
+		switch chosen.inner {
+			case .none:
+				// Nothing further. The caller asks for SecurityResult next.
+				break
+			case .vnc:
+				try await performVNCAuthentication()
+			case .plain:
+				try await performVeNCryptPlainAuthentication()
+			case .ident, .sasl:
+				// Not reachable: `chooseVeNCryptSubtype` does not select these.
+				throw VNCError.protocol(.notImplemented(feature: "VeNCrypt \(chosen)"))
+		}
+	}
+
+	/// Which subtype to use, from what the server offered.
+	///
+	/// Ordered by what it costs the user if it goes wrong, not by convenience:
+	///
+	/// 1. **X509 subtypes** first. Real TLS with a real certificate. The only
+	///    ones that both encrypt and authenticate the server.
+	/// 2. **Nothing else.** In particular:
+	///    * The TLS-prefixed subtypes are skipped because they require an
+	///      anonymous certificate, which means an anonymous key exchange, which
+	///      no modern TLS library will perform and which offers no protection
+	///      against a machine in the middle anyway.
+	///    * `Plain` and `Ident` are skipped because they send a password, or a
+	///      user name, in the clear -- over a connection whose whole purpose was
+	///      to be encrypted. rfbproto.rst says of Plain: "should be never used".
+	///    * SASL is not implemented.
+	///
+	/// Returning nil fails the connection with
+	/// `clientCouldNotDecideOnSecurityType`, and `offeredVeNCryptSubtypes` has
+	/// already been recorded so the embedder can say which numbers were on offer.
+	func chooseVeNCryptSubtype(from offered: [UInt32]) -> VNCProtocol.VeNCryptSubtype? {
+		guard tlsUpgradeProvider != nil else {
+			logger.logInfo("""
+				VeNCrypt: no TLS provider is set, so none of the subtypes that \
+				protect the connection can be completed
+				""")
+
+			return nil
+		}
+
+		let preference: [VNCProtocol.VeNCryptSubtype] = [.x509Vnc, .x509Plain, .x509None]
+
+		for candidate in preference where offered.contains(candidate.rawValue) {
+			return candidate
+		}
+
+		return nil
+	}
+
+	/// The Plain subtype's credential exchange, inside whatever TLS is in place.
+	///
+	/// rfbproto.rst, "Plain subtype": two lengths, then the two values, all
+	/// UTF-8 and not NUL-terminated.
+	func performVeNCryptPlainAuthentication() async throws {
+		let credential = try await askDelegateForUsernamePasswordCredential(
+			authenticationType: .ultraVNCMSLogonII
+		)
+
+		let username = Data(credential.username.utf8)
+		let password = Data(credential.password.utf8)
+
+		var data = Data(capacity: 8 + username.count + password.count)
+		data.append(UInt32(username.count), bigEndian: true)
+		data.append(UInt32(password.count), bigEndian: true)
+		data.append(username)
+		data.append(password)
+
+		try await connection.write(data: data)
+	}
+
+	/// Hands the live transport to the embedder to be wrapped in TLS.
+	func upgradeToTLS() async throws {
+		guard let tlsUpgradeProvider else {
+			// Unreachable via `chooseVeNCryptSubtype`, which refuses to select a
+			// TLS subtype without a provider. Checked anyway, because reaching
+			// here without one would mean continuing in plaintext on a
+			// connection the server believes is encrypted.
+			throw VNCError.protocol(.notImplemented(feature: "VeNCrypt TLS upgrade"))
+		}
+
+		logger.logInfo("VeNCrypt: upgrading the connection to TLS")
+
+		let upgraded = try await tlsUpgradeProvider(connection.transport,
+													settings.hostname)
+
+		connection.replaceTransport(with: upgraded)
+
+		logger.logInfo("VeNCrypt: TLS established")
 	}
 
 	func performVNCAuthentication() async throws {

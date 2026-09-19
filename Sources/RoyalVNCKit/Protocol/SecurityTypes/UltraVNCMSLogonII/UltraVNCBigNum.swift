@@ -29,8 +29,27 @@ extension VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAgreement 
 			return data
 		}
 
+		/// A Diffie-Hellman private exponent, never 0 or 1.
+		///
+		/// Both of those are degenerate and neither is theoretical, they are
+		/// simply rare. With a private exponent of 0 the public key is
+		/// `g^0 = 1` and the shared secret is `resp^0 = 1` -- a constant, so the
+		/// DES key derived from it is the same for every session that draws it.
+		/// With an exponent of 1 the shared secret is `resp^1 = resp`, and
+		/// `resp` is the value the *server sends in the clear* before the key
+		/// agreement. Either one hands the credential key to anyone who watched
+		/// the handshake, and both sides still agree, so the connection
+		/// succeeds and nothing looks wrong.
+		///
+		/// The odds are about two in 2^31 per connection, which is why this is a
+		/// comment rather than a bug report. It costs one character to make them
+		/// zero.
 		static func randomBigNum(max: UInt32) -> UInt64 {
-			let num = UInt32.random(in: 0..<max)
+			// The one caller passes `maxNum`, which is `(1 << maxBits) - 1` --
+			// a compile-time constant far above 2, so the range cannot be
+			// empty. Worth saying because `random(in:)` traps on an empty
+			// range rather than returning anything.
+			let num = UInt32.random(in: 2..<max)
 
 			return .init(num)
 		}

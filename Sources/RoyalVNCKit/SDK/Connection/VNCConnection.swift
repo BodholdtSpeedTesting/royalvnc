@@ -123,7 +123,16 @@ public final class VNCConnection: NSObjectOrAnyObject {
 		}
 	}
 
+	// Spinlock on the platforms whose Foundation does not carry NSLock. The kit
+	// imports FoundationEssentials where it can, and on Linux that import
+	// succeeds without bringing NSLock with it, so a bare `NSLock()` here
+	// compiles on Apple platforms and fails everywhere else. This is the same
+	// shape `VNCFramebufferMallocAllocator` already uses.
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let negotiatedSecurityMethodLock = Spinlock()
+#else
 	private let negotiatedSecurityMethodLock = NSLock()
+#endif
 	private var negotiatedSecurityMethodStorage: VNCSecurityMethod?
 
 	/// Every security type the server offered, as the raw numbers on the wire.
@@ -161,7 +170,11 @@ public final class VNCConnection: NSObjectOrAnyObject {
 		}
 	}
 
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let offeredSecurityTypesLock = Spinlock()
+#else
 	private let offeredSecurityTypesLock = NSLock()
+#endif
 	private var offeredSecurityTypesStorage: [UInt32] = []
 
 	/// How many rectangles have arrived under each encoding, by encoding type.
@@ -192,7 +205,11 @@ public final class VNCConnection: NSObjectOrAnyObject {
 		}
 	}
 
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let rectanglesByEncodingLock = Spinlock()
+#else
 	private let rectanglesByEncodingLock = NSLock()
+#endif
 	private var rectanglesByEncodingStorage: [Int32: Int] = [:]
 
 	/// Counts a batch of rectangles. Called on the connection's own task.

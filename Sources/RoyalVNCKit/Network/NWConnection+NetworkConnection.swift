@@ -41,10 +41,24 @@ extension NWConnection: NetworkConnection {
     /// imported; above it, `NetworkConnectionStatus` carries a plain `Error` and
     /// cannot tell the two apart.
     static func isAnAnswer(_ error: NWError) -> Bool {
-        guard case .posix(let code) = error else { return false }
+        switch error {
+        case .posix(let code):
+            switch code {
+            case .ECONNREFUSED, .ECONNRESET, .ENETDOWN:
+                return true
 
-        switch code {
-        case .ECONNREFUSED, .ECONNRESET, .ENETDOWN:
+            default:
+                // EPERM and EHOSTUNREACH land here deliberately: an unanswered
+                // Local Network prompt looks like both, and it clears the
+                // moment the user taps Allow.
+                return false
+            }
+
+        case .dns:
+            // A name that does not resolve is an answer too, and it arrives as
+            // `.dns` rather than `.posix` -- which is how a mistyped host name
+            // slipped through the first version of this and waited out the full
+            // deadline. Caught by the resolver test in RepeaterEndToEndTests.
             return true
 
         default:

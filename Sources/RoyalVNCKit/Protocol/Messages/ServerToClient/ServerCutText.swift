@@ -12,6 +12,13 @@ extension VNCProtocol {
 
 		static let stringEncoding: String.Encoding = .isoLatin1
 
+		/// The largest clipboard this client will accept from a server.
+		///
+		/// Generous on purpose: this is Latin-1 text, so 16 MiB is sixteen
+		/// million characters, far more than a person pastes and far less than
+		/// the two gigabytes the wire format allows.
+		static let maximumTextLength = 16 * 1024 * 1024
+
         let messageType: UInt8
         let text: String
 
@@ -28,6 +35,18 @@ extension VNCProtocol.ServerCutText {
 											 logger: logger)
 
 		if length >= 0 { // Standard Message
+			// 7.6.4's length is a 32-bit number the server picks, and nothing
+			// bounds it. Believing it means reserving up to two gigabytes and
+			// then reading the rest of the stream as clipboard text -- the
+			// session does not crash, it silently stops decoding anything else.
+			//
+			// This arrives mid-session, which sounds like it needs a server the
+			// user already trusts. It does not: with security type None there is
+			// no authentication anywhere in the exchange.
+			guard length <= Self.maximumTextLength else {
+				throw VNCError.protocol(.invalidData)
+			}
+
 			let text = try await connection.readString(encoding: Self.stringEncoding,
 													   length: .init(length))
 

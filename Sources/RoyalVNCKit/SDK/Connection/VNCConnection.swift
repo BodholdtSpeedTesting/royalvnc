@@ -284,6 +284,21 @@ public final class VNCConnection: NSObjectOrAnyObject {
 	// MARK: - Private Properties
 	private var hasCreatedConnection = false
 
+	/// How long the path may stay unusable before the attempt is abandoned.
+	///
+	/// The same number `NetworkConnectionSettings` is built with below, so the
+	/// wait for a usable path and the wait for a TCP handshake give up together.
+	static let pathTimeout = 15
+
+	/// Armed on the first `.waiting`, cancelled by any settled state.
+	private var pathDeadline: DispatchWorkItem?
+
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let pathDeadlineLock = Spinlock()
+#else
+	private let pathDeadlineLock = NSLock()
+#endif
+
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)
 
@@ -614,26 +629,81 @@ private extension VNCConnection {
 			case .ready:
 				logger.logDebug("Connection State - Ready")
 
+				cancelPathDeadline()
+
 				connectionDidBecomeReady()
 
+			// NOT a failure. `.waiting` means "cannot proceed yet, still
+			// trying", and the connection retries by itself.
+			//
+			// This used to fail immediately, and the case that made it matter is
+			// the first connection a fresh install ever makes: on macOS 15 and
+			// later the system asks for Local Network permission, and the
+			// connection sits in `.waiting` until the user answers. Failing then
+			// meant the first thing anyone did with the app failed while the
+			// system alert was still on screen, with no way to tell it apart
+			// from a broken server.
+			//
+			// A refusal never reaches here -- the Network layer reports that as
+			// `.failed`, because it is an answer rather than a delay. So the only
+			// thing left to bound is a path that never becomes usable at all,
+			// which the deadline does.
 			case .waiting(let error):
 				logger.logDebug("Connection State - Waiting with error: \(error)")
 
-				connectionDidFail(error: .connection(.failed(error)))
+				armPathDeadline(lastReason: error)
 
 			case .failed(let error):
 				logger.logDebug("Connection State - Failed with error: \(error)")
 
+				cancelPathDeadline()
 				connectionDidFail(error: .connection(.failed(error)))
 
 			case .cancelled:
 				logger.logDebug("Connection State - Cancelled")
 
+				cancelPathDeadline()
 				connectionDidFail(error: .connection(.cancelled))
 
             case .unknown(let underlyingState):
 				logger.logDebug("Connection State - Unknown (\(underlyingState))")
 		}
+	}
+
+	/// Starts the clock on an unusable path, once.
+	///
+	/// `.waiting` repeats on every retry, so only the first arms anything.
+	func armPathDeadline(lastReason: Error) {
+		pathDeadlineLock.lock()
+
+		guard pathDeadline == nil else {
+			pathDeadlineLock.unlock()
+
+			return
+		}
+
+		let deadline = DispatchWorkItem { [weak self] in
+			guard let self else { return }
+
+			self.connectionDidFail(error: .connection(.failed(lastReason)))
+		}
+
+		pathDeadline = deadline
+		pathDeadlineLock.unlock()
+
+		queue.asyncAfter(deadline: .now() + .seconds(Self.pathTimeout),
+						 execute: deadline)
+	}
+
+	func cancelPathDeadline() {
+		pathDeadlineLock.lock()
+
+		let deadline = pathDeadline
+		pathDeadline = nil
+
+		pathDeadlineLock.unlock()
+
+		deadline?.cancel()
 	}
 
 	func connectionDidBecomeReady() {

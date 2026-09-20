@@ -24,10 +24,43 @@ extension NWConnection: NetworkConnection {
                   using: connectionParameters)
     }
 
+    /// Whether a `.waiting` reason is an answer rather than a delay.
+    ///
+    /// `NWConnection` uses `.waiting` for two different situations and the
+    /// difference decides whether a connection should give up. A refusal is an
+    /// answer: something replied and retrying gets the same reply. Anything else
+    /// -- no usable path yet, and in particular a Local Network permission the
+    /// user has not answered -- clears on its own if given a moment.
+    ///
+    /// Measured on macOS: a closed port on loopback reports
+    /// `.waiting(ECONNREFUSED)` at 0.00s and stays there while it retries, so
+    /// the refusal case has to be recognised here or a mistyped port waits out
+    /// the whole connection timeout.
+    ///
+    /// The classification lives in this file because this is where Network is
+    /// imported; above it, `NetworkConnectionStatus` carries a plain `Error` and
+    /// cannot tell the two apart.
+    static func isAnAnswer(_ error: NWError) -> Bool {
+        guard case .posix(let code) = error else { return false }
+
+        switch code {
+        case .ECONNREFUSED, .ECONNRESET, .ENETDOWN:
+            return true
+
+        default:
+            return false
+        }
+    }
+
     var status: NetworkConnectionStatus {
         switch state {
         case .setup: .setup
-        case .waiting(let error): .waiting(error)
+
+        // A definitive `.waiting` is reported upwards as the failure it is, so
+        // that the layer above can treat every remaining `.waiting` as "not
+        // yet" and wait for it.
+        case .waiting(let error):
+            Self.isAnAnswer(error) ? .failed(error) : .waiting(error)
         case .preparing: .preparing
         case .ready: .ready
         case .failed(let error): .failed(error)
@@ -50,7 +83,10 @@ extension NWConnection: NetworkConnection {
             case .setup:
                 statusUpdateHandler(.setup)
             case .waiting(let error):
-                statusUpdateHandler(.waiting(error))
+                // Same split as `status` above: a refusal is reported as the
+                // failure it is, everything else as "not yet".
+                statusUpdateHandler(Self.isAnAnswer(error) ? .failed(error)
+                                                           : .waiting(error))
             case .preparing:
                 statusUpdateHandler(.preparing)
             case .ready:

@@ -25,7 +25,27 @@ final class VNCClipboardMonitor {
 	private var timer: Timer?
 #endif
 
-	private var lastChangeCount = 0
+	/// The change count this monitor has already accounted for.
+	///
+	/// Guarded, because it is now written from two places: the timer, which runs
+	/// on the main queue, and `acknowledgeCurrentContents()`, which the receive
+	/// path calls from the connection's own queue.
+	private let changeCountLock = NSLock()
+	private var lastChangeCountStorage = 0
+
+	private var lastChangeCount: Int {
+		get {
+			changeCountLock.lock()
+			defer { changeCountLock.unlock() }
+
+			return lastChangeCountStorage
+		}
+		set {
+			changeCountLock.lock()
+			lastChangeCountStorage = newValue
+			changeCountLock.unlock()
+		}
+	}
 
 	init(clipboard: VNCClipboard,
 		 monitoringInterval: TimeInterval,
@@ -43,6 +63,22 @@ final class VNCClipboardMonitor {
 }
 
 extension VNCClipboardMonitor {
+	/// Marks whatever is on the clipboard right now as already seen.
+	///
+	/// Called after the *client* writes the clipboard on the server's behalf, so
+	/// that the monitor does not mistake its own write for something the user
+	/// copied and send it straight back.
+	///
+	/// Without this, every ServerCutText bounced. Measured against this project's
+	/// stand-in: the server sent `SENTINEL-FROM-THE-SERVER` and the client
+	/// returned the identical 24 bytes as ClientCutText half a second later. With
+	/// two sessions open it is worse than wasted traffic -- one server's clipboard
+	/// reaches the other, because the monitor cannot tell which connection caused
+	/// a change to a pasteboard the whole process shares.
+	func acknowledgeCurrentContents() {
+		lastChangeCount = clipboard.changeCount
+	}
+
 	func startMonitoring() {
 		stopMonitoring()
 

@@ -115,6 +115,11 @@ private extension VNCConnection {
 		guard settings.isClipboardRedirectionEnabled else { return }
 
 		clipboard.text = text
+
+		// Our own write, not the user's. Without this the monitor sees the
+		// change on its next tick and sends the server its own clipboard
+		// straight back.
+		clipboardMonitor.acknowledgeCurrentContents()
 	}
 
 	func handleBellMessage() async throws {

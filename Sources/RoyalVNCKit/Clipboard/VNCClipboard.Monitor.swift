@@ -71,22 +71,6 @@ final class VNCClipboardMonitor {
 }
 
 extension VNCClipboardMonitor {
-	/// Marks whatever is on the clipboard right now as already seen.
-	///
-	/// Called after the *client* writes the clipboard on the server's behalf, so
-	/// that the monitor does not mistake its own write for something the user
-	/// copied and send it straight back.
-	///
-	/// Without this, every ServerCutText bounced. Measured against this project's
-	/// stand-in: the server sent `SENTINEL-FROM-THE-SERVER` and the client
-	/// returned the identical 24 bytes as ClientCutText half a second later. With
-	/// two sessions open it is worse than wasted traffic -- one server's clipboard
-	/// reaches the other, because the monitor cannot tell which connection caused
-	/// a change to a pasteboard the whole process shares.
-	func acknowledgeCurrentContents() {
-		lastChangeCount = clipboard.changeCount
-	}
-
 	func startMonitoring() {
 		stopMonitoring()
 
@@ -143,6 +127,12 @@ private extension VNCClipboardMonitor {
 		}
 
 		lastChangeCount = currentChangeCount
+
+		// A change this client made on a server's behalf, not something the
+		// person at this machine copied. Sending it on would either hand the
+		// server its own clipboard back or hand it another session's. See
+		// `VNCClipboardWrites`.
+		guard !VNCClipboardWrites.wasOurs(currentChangeCount) else { return }
 
 		guard let text = clipboard.text else { // No text
 			return

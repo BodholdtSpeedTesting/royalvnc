@@ -116,10 +116,12 @@ private extension VNCConnection {
 
 		clipboard.text = text
 
-		// Our own write, not the user's. Without this the monitor sees the
-		// change on its next tick and sends the server its own clipboard
-		// straight back.
-		clipboardMonitor.acknowledgeCurrentContents()
+		// Our own write, not the user's, and recorded where EVERY connection's
+		// monitor can see it. Telling only this connection's monitor stops the
+		// echo back to this server but not the leak to another one: the
+		// pasteboard belongs to the process, so a second session's monitor sees
+		// the same change and forwards this server's clipboard to its own.
+		VNCClipboardWrites.record(clipboard.changeCount)
 	}
 
 	func handleBellMessage() async throws {

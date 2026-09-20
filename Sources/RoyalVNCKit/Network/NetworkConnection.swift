@@ -37,6 +37,11 @@ struct NetworkConnectionSettings {
     let port: UInt16
 }
 
+/// The largest length-prefixed string this client will believe a server about.
+///
+/// See `readString(encoding:)`.
+private let maximumLengthPrefixedStringLength: UInt32 = 64 * 1024
+
 protocol NetworkConnection: NetworkConnectionReading, NetworkConnectionWriting {
     init(settings: NetworkConnectionSettings)
 
@@ -185,8 +190,29 @@ extension NetworkConnectionReading {
         return value
     }
 
+    /// The largest length-prefixed string this client will believe a server
+    /// about.
+    ///
+    /// RFB carries the ServerInit desktop name (RFC 6143 7.3.2) and the
+    /// SecurityResult failure reason (7.1.3) as a 32-bit length followed by
+    /// that many bytes. The specification puts no ceiling on either, and both
+    /// are chosen entirely by the peer.
+    ///
+    /// Both are short pieces of text meant to be shown to a person, so 64 KiB
+    /// is already far past anything a real server sends. Without a limit the
+    /// declared length is passed straight to `Data(capacity:)`, and a server
+    /// that claims `0xFFFFFFFF` gets the client to reserve 4 GiB and then block
+    /// forever for bytes it is never going to send.
+    ///
+    /// The failure reason is the dangerous one, because it is read *before*
+    /// authentication has succeeded — any host that can complete a TCP
+    /// handshake can send it.
     func readString(encoding: String.Encoding) async throws -> String {
         let length = try await readUInt32()
+
+        guard length <= maximumLengthPrefixedStringLength else {
+            throw VNCError.protocol(.invalidData)
+        }
 
         let stringValue = try await readString(encoding: encoding,
                                                length: .init(length))

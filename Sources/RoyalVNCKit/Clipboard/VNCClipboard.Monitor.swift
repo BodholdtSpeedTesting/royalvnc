@@ -30,7 +30,15 @@ final class VNCClipboardMonitor {
 	/// Guarded, because it is now written from two places: the timer, which runs
 	/// on the main queue, and `acknowledgeCurrentContents()`, which the receive
 	/// path calls from the connection's own queue.
+	// Spinlock where Foundation does not carry NSLock. The kit imports
+	// FoundationEssentials where it can, and on Linux that import succeeds
+	// without bringing NSLock with it -- the same shape VNCConnection and
+	// VNCFramebufferMallocAllocator already use.
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let changeCountLock = Spinlock()
+#else
 	private let changeCountLock = NSLock()
+#endif
 	private var lastChangeCountStorage = 0
 
 	private var lastChangeCount: Int {

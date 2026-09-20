@@ -51,6 +51,25 @@ extension VNCProtocol.FramebufferUpdate {
 			}
 
 			if let frameEncoding = encoding as? VNCFrameEncoding {
+				// A frame rectangle is an area *of the framebuffer* (RFC 6143
+				// 7.6.1), so one that does not fit inside it is malformed. The
+				// check is here rather than in `Rectangle.receive` because a
+				// pseudo-encoding's width and height are not a region at all --
+				// DesktopSize uses them for the new framebuffer size, which is
+				// legitimately larger than the current one.
+				//
+				// Unchecked, these two 16-bit numbers size the allocation in
+				// every frame decoder: Raw reads width*height*bytesPerPixel
+				// straight off the socket and Zlib reserves it for the
+				// decompressed output, so 65535x65535 is about seventeen
+				// gigabytes regardless of how big the screen actually is.
+				let fits = Int(rectangle.xPosition) + Int(rectangle.width) <= Int(framebuffer.size.width)
+					&& Int(rectangle.yPosition) + Int(rectangle.height) <= Int(framebuffer.size.height)
+
+				guard fits else {
+					throw VNCError.protocol(.invalidData)
+				}
+
 				logger.logDebug("Decoding frame rectangle \(idx + 1)/\(numberOfRectangles)")
 
 				try await frameEncoding.decodeRectangle(rectangle,

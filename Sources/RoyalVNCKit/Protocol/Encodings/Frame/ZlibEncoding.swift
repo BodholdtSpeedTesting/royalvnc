@@ -17,14 +17,23 @@ extension VNCProtocol.ZlibEncoding {
                          framebuffer: VNCFramebuffer,
                          connection: NetworkConnectionReading,
                          logger: VNCLogger) async throws {
-		let compressedData = try await Self.retrieveCompressedData(connection: connection,
-																   logger: logger)
-
         let bytesPerPixel = framebuffer.sourceProperties.bytesPerPixel
 
 		let totalRAWBytes = rectangle.width <= 0 && rectangle.height <= 0
 			? UInt(0)
 			: UInt(Int(rectangle.width) * Int(rectangle.height) * bytesPerPixel)
+
+		// The compressed length is its own 32-bit number on the wire, separate
+		// from the rectangle, so bounding the rectangle does not bound it: a
+		// server can ask for four gigabytes of "compressed" data for a one-pixel
+		// rectangle. Compressing cannot usefully make data bigger, so the
+		// uncompressed size plus slack for zlib's own worst case is a generous
+		// ceiling.
+		let maximumCompressedBytes = Int(totalRAWBytes) + 64 * 1024
+
+		let compressedData = try await Self.retrieveCompressedData(connection: connection,
+																   maximumBytes: maximumCompressedBytes,
+																   logger: logger)
 
 		var data: Data
 
@@ -57,8 +66,13 @@ extension VNCProtocol.ZlibEncoding {
 
 extension VNCProtocol.ZlibEncoding {
 	static func retrieveCompressedData(connection: NetworkConnectionReading,
+									   maximumBytes: Int,
 									   logger: VNCLogger) async throws -> Data {
 		let compressedBytesToRead = Int(try await connection.readUInt32())
+
+		guard compressedBytesToRead <= maximumBytes else {
+			throw VNCError.protocol(.invalidData)
+		}
 
 		guard compressedBytesToRead > 0 else {
 			logger.logDebug("Nothing to Zlib download, skipping")

@@ -36,7 +36,17 @@ extension ZlibStream {
 		try stream.inflateReset()
 	}
 
-    func decompressedData(compressedData: Data) throws -> Data {
+    /// Inflates without knowing the output size in advance, refusing to produce
+    /// more than `maximumBytes`.
+    ///
+    /// The ceiling is not optional. Compression ratios are unbounded in
+    /// principle -- a few kilobytes of crafted input inflates to gigabytes --
+    /// so a decoder that grows its output until the stream says stop is doing
+    /// whatever the sender tells it to. Every caller knows how large a
+    /// legitimate result can be, because it is bounded by the rectangle being
+    /// decoded.
+    func decompressedData(compressedData: Data,
+                          maximumBytes: Int) throws -> Data {
 		let stream = self.stream
 		let flush = ZlibFlush.noFlush
 
@@ -88,6 +98,10 @@ extension ZlibStream {
 						let actualOut = bufferSize - availOut
 
 						if actualOut > 0 {
+							guard decompressedData.count + Int(actualOut) <= maximumBytes else {
+								throw VNCError.protocol(.zlibDecompress(underlyingError: nil))
+							}
+
 							decompressedData.append(buffer,
 													count: .init(actualOut))
 						}

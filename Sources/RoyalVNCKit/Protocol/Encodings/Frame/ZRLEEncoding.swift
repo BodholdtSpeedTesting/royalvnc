@@ -63,10 +63,20 @@ extension VNCProtocol.ZRLEEncoding {
 			self.tileBuffer = .init(repeating: 0, count: bufferLength)
 		}
 
+		// What a legitimate ZRLE rectangle can inflate to: its own pixels, plus
+		// room for per-tile subencoding bytes and palettes. Doubling covers that
+		// with a wide margin. The rectangle itself is bounded against the
+		// framebuffer before any decoder is reached, so this is a real ceiling
+		// rather than another 16-bit number the server chose.
+		let rectangleBytes = Int(rectangle.width) * Int(rectangle.height) * currentBytesPerPixel
+		let maximumInflatedBytes = rectangleBytes * 2 + 64 * 1024
+
 		let compressedData = try await VNCProtocol.ZlibEncoding.retrieveCompressedData(connection: connection,
+																					   maximumBytes: maximumInflatedBytes,
 																					   logger: logger)
 
-		let decompressedData = try zStream.decompressedData(compressedData: compressedData)
+		let decompressedData = try zStream.decompressedData(compressedData: compressedData,
+														    maximumBytes: maximumInflatedBytes)
 
 		let stream = DataStream(data: decompressedData)
 

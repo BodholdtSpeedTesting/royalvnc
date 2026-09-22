@@ -322,7 +322,58 @@ public final class VNCConnection: NSObjectOrAnyObject {
 
 	let clientToServerMessageQueue = Queue<VNCSendableMessage>()
 
-    var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
+    /// Which buttons are held, read by every pointer event.
+    ///
+    /// Read-only from outside, because an `insert` or a `remove` through a
+    /// locked `get`/`set` pair would release the lock in the middle of the
+    /// read-modify-write and be no safer than no lock at all -- the same trap
+    /// `Queue` avoids by locking inside. `setMouseButton(_:isDown:)` does it
+    /// under one lock instead.
+    ///
+    /// It races in principle rather than in practice: it is touched only by
+    /// embedder input, so an embedder that sends all of its input from one
+    /// thread -- as the Bodholdt Viewer app does -- never contends for it. The
+    /// send loop does not read it. That makes this robustness rather than a
+    /// shipping crash, unlike `clientToServerMessageQueue`, and it is fixed
+    /// because a stress test in the embedder drove buttons and moves from two
+    /// threads and Thread Sanitizer objected:
+    ///
+    ///     WARNING: ThreadSanitizer: Swift access race
+    ///       Modifying by T2: updateMouseButtonState(mousePointerButton:isDown:)
+    ///       Previous read by T3: enqueueMouseEvent(nonNormalizedX:nonNormalizedY:)
+    private(set) var mouseButtonState: VNCProtocol.MousePointerButton {
+        get {
+            mouseButtonStateLock.lock()
+            defer { mouseButtonStateLock.unlock() }
+
+            return mouseButtonStateStorage
+        }
+        set {
+            mouseButtonStateLock.lock()
+            mouseButtonStateStorage = newValue
+            mouseButtonStateLock.unlock()
+        }
+    }
+
+    /// Holds or releases one button, as a single atomic step.
+    func setMouseButton(_ button: VNCProtocol.MousePointerButton, isDown: Bool) {
+        mouseButtonStateLock.lock()
+        defer { mouseButtonStateLock.unlock() }
+
+        if isDown {
+            mouseButtonStateStorage.insert(button)
+        } else {
+            mouseButtonStateStorage.remove(button)
+        }
+    }
+
+    private var mouseButtonStateStorage: VNCProtocol.MousePointerButton = [ ]
+
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+    private let mouseButtonStateLock = Spinlock()
+#else
+    private let mouseButtonStateLock = NSLock()
+#endif
 
     // Concrete rather than opaque. It was `some NetworkConnection`, on the
     // reasoning that an existential would ripple through the files taking a

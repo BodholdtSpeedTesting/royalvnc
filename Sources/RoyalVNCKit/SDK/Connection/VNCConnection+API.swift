@@ -124,11 +124,7 @@ extension VNCConnection {
 
     func updateMouseButtonState(mousePointerButton: VNCProtocol.MousePointerButton,
                                 isDown: Bool) {
-        if isDown {
-            mouseButtonState.insert(mousePointerButton)
-        } else {
-            mouseButtonState.remove(mousePointerButton)
-        }
+        setMouseButton(mousePointerButton, isDown: isDown)
     }
 }
 

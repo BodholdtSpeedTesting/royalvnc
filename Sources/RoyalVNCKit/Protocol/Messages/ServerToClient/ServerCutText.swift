@@ -77,8 +77,15 @@ private extension VNCProtocol.ServerCutText {
 			throw VNCError.protocol(.invalidData)
 		}
 
+		// `loadUnaligned`, as `readUInt32` has always used. `load(as:)` requires
+		// the address to be a multiple of four and traps when it is not, and
+		// `Data` promises nothing about where its bytes are: four bytes are held
+		// inline, and `withUnsafeBytes` points at a stack copy of a `UInt8`
+		// tuple, placed wherever the compiler chose. An ordinary debug build
+		// happened to choose an aligned slot. A Thread Sanitizer build did not,
+		// and trapped here with "load from misaligned raw pointer".
 		let bigEndianUnsignedLength = lengthData.withUnsafeBytes {
-			$0.load(as: UInt32.self)
+			$0.loadUnaligned(as: UInt32.self)
 		}
 
         let endianess = Endianness.current
@@ -89,8 +96,9 @@ private extension VNCProtocol.ServerCutText {
 
 		// TODO: Is that the correct check?
 		if length > Int32.max {
+			// The same bytes, so the same reason.
 			let bigEndianSignedLength = lengthData.withUnsafeBytes {
-				$0.load(as: Int32.self)
+				$0.loadUnaligned(as: Int32.self)
 			}
 
 			length = endianess == .little

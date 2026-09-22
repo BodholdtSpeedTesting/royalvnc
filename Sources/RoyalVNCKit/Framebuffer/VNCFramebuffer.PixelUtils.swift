@@ -79,16 +79,25 @@ extension VNCFramebuffer.PixelUtils {
 					 blue: destinationBlue)
 	}
 
+	/// Unaligned loads throughout, because nothing aligns `pixelData`.
+	///
+	/// It is the bytes of whatever `Data` a decoder produced: a one-pixel fill
+	/// colour is held inline and reached through a stack copy the compiler may
+	/// place at any address, and a block of pixels may be a slice starting
+	/// anywhere. `load(fromByteOffset:as:)` traps unless the address is a
+	/// multiple of the type's alignment, so a 16-bit session -- the one that
+	/// converts colour and so reaches this -- could trap on a pixel for no
+	/// reason but where its buffer happened to be.
 	private static func pixelValue(_ pixelData: UnsafeRawBufferPointer,
 								   pixelDataOffset: Int,
 								   bitsPerPixel: Int) -> Int {
 		switch bitsPerPixel {
 			case 32:
-				.init(pixelData.load(fromByteOffset: pixelDataOffset, as: UInt32.self))
+				.init(pixelData.loadUnaligned(fromByteOffset: pixelDataOffset, as: UInt32.self))
 			case 16:
-				.init(pixelData.load(fromByteOffset: pixelDataOffset, as: UInt16.self))
+				.init(pixelData.loadUnaligned(fromByteOffset: pixelDataOffset, as: UInt16.self))
 			case 8:
-				.init(pixelData.load(fromByteOffset: pixelDataOffset, as: UInt8.self))
+				.init(pixelData.loadUnaligned(fromByteOffset: pixelDataOffset, as: UInt8.self))
 			default:
 				fatalError("Unsupported bits per pixel: \(bitsPerPixel)")
 		}

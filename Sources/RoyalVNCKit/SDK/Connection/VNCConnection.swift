@@ -32,10 +32,70 @@ public final class VNCConnection: NSObjectOrAnyObject {
 #endif
 	public var framebuffer: VNCFramebuffer?
 
+	/// Where the connection is in its life. Readable from any thread.
+	///
+	/// GUARDED, because three threads really do touch it. It is written by
+	/// `beginConnecting` and `beginDisconnecting` on whichever thread called
+	/// `connect()` or `disconnect()` -- the main one, in an app -- and by the
+	/// handshake's `Task`, on the cooperative pool, when it announces
+	/// `.connected`; a server that hangs up has the receive loop write it too.
+	/// And it is read every half second by the clipboard monitor's timer on the
+	/// main thread, and by any embedder that asks. It was a plain stored
+	/// property, and Thread Sanitizer reported both shapes in the embedder's
+	/// suite:
+	///
+	///     WARNING: ThreadSanitizer: data race
+	///       Write of size 8 by thread T39:
+	///         VNCConnection.updateConnectionState(_:)
+	///         closure #1 in VNCConnection.connectionDidBecomeReady()
+	///       Previous write of size 8 by thread T15:
+	///         VNCConnection.updateConnectionState(_:)
+	///         VNCConnection.beginDisconnecting(error:)
+	///         VNCConnection.disconnect()
+	///
+	///     WARNING: ThreadSanitizer: data race
+	///       Read of size 8 by main thread:
+	///         VNCConnection.clipboardMonitorShouldMonitor(_:)
+	///         VNCClipboardMonitor.timerDidFire(_:)
+	///       Previous write of size 8 by thread T15:
+	///         VNCConnection.updateConnectionState(_:)
+	///         VNCConnection.beginDisconnecting(error:)
+	///         VNCConnection.handleBreakingError(_:)
+	///         closure #1 in VNCConnection.startReceiveLoop()
+	///
+	/// `ConnectionState` is a class, so this is a strong reference, and an
+	/// unsynchronised store is load-old, store-new, release-old: two of them at
+	/// once can release the same object twice, and a reader can retain one that
+	/// is being freed. Not merely a stale value.
+	///
+	/// Read-only, with no internal setter either, so that nothing can write it
+	/// except through `recordConnectionState(_:)` and the rule that goes with it.
 #if canImport(ObjectiveC)
 	@objc
 #endif
-	public internal(set) var connectionState = ConnectionState.disconnected
+	public var connectionState: ConnectionState {
+		connectionStateLock.lock()
+		defer { connectionStateLock.unlock() }
+
+		return connectionStateStorage
+	}
+
+	private var connectionStateStorage = ConnectionState.disconnected
+
+	/// Raised, under `connectionStateLock`, when `.disconnecting` is recorded.
+	///
+	/// A flag rather than a look at the stored status, because `.disconnected`
+	/// is both where a connection starts and where it ends, and only the
+	/// second must refuse to move again.
+	private var hasBegunDisconnecting = false
+
+	// Spinlock on the platforms whose Foundation does not carry NSLock; same
+	// shape as `negotiatedSecurityMethodLock` below.
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let connectionStateLock = Spinlock()
+#else
+	private let connectionStateLock = NSLock()
+#endif
 
 #if canImport(ObjectiveC)
 	@objc
@@ -598,7 +658,13 @@ public final class VNCConnection: NSObjectOrAnyObject {
 // MARK: - Internal Connection State API
 extension VNCConnection {
 	func beginConnecting() {
-		updateConnectionState(.connecting)
+		// Refused only if `disconnect()` has already been called on this
+		// object, which is single-use. Before the rule in
+		// `recordConnectionState`, `disconnect()` then `connect()` announced
+		// `.connecting` after `.disconnected` and stayed there for good: the
+		// cancelled transport's failure is routed to `beginDisconnecting`,
+		// which has already run and ignores it.
+		guard updateConnectionState(.connecting) else { return }
 
 		// A transport handed over by `transportProvider` may already be
 		// established, because the embedder had to talk on it first.
@@ -648,8 +714,18 @@ extension VNCConnection {
 		beginDisconnecting(error: error)
 	}
 
-	func updateConnectionState(_ newConnectionState: ConnectionState) {
-		self.connectionState = newConnectionState
+	/// Moves to a new state, then acts on it and tells the delegate.
+	///
+	/// Returns `false`, and does nothing else at all, when the move is refused
+	/// because a disconnect has already begun -- see `recordConnectionState`.
+	/// The handshake task relies on that to decide whether to start the loops.
+	@discardableResult
+	func updateConnectionState(_ newConnectionState: ConnectionState) -> Bool {
+		guard recordConnectionState(newConnectionState) else {
+			logger.logDebug("Connection State - a change after disconnecting began was ignored")
+
+			return false
+		}
 
 		switch newConnectionState.status {
 			case .connecting:
@@ -666,6 +742,55 @@ extension VNCConnection {
 		}
 
 		notifyDelegateAboutConnectionStateChange(newConnectionState)
+
+		return true
+	}
+
+	/// Stores a new state, unless a disconnect has already begun, as one step.
+	///
+	/// THE RULE: once `.disconnecting` has been recorded, the only state that
+	/// may follow it is `.disconnected`.
+	///
+	/// A lock around the store alone would have silenced Thread Sanitizer and
+	/// left the part an embedder can see. The handshake task announces
+	/// `.connected` after its final write, and a `disconnect()` can land in the
+	/// gap between that write completing and the task being scheduled again --
+	/// as long as the cooperative pool takes to get round to it. The disconnect
+	/// ran to the end, the task then wrote `.connected` over `.disconnected`,
+	/// and the last thing the delegate heard was that a session the embedder
+	/// had just ended was live. The kit also started clipboard monitoring and
+	/// both loops for it. The embedder's `DisconnectAtConnectTests` forces
+	/// exactly that ordering and saw it on every run.
+	///
+	/// So the test and the store are one locked step here. Checking under one
+	/// lock and storing under another -- or through a locked getter and setter
+	/// -- would leave the same gap between the two, only narrower.
+	///
+	/// WHAT THIS DOES NOT DO is order the announcements themselves. The
+	/// delegate is called after the lock is released, and has to be: an
+	/// embedder may call back into the connection from inside the callback --
+	/// read `connectionState`, or call `disconnect()` -- and neither NSLock nor
+	/// Spinlock is recursive, so holding it across the call would deadlock.
+	/// A disconnect on another thread can therefore still deliver both of its
+	/// announcements between this recording `.connected` and announcing it.
+	/// That window is a handful of instructions rather than a scheduling
+	/// delay, and the stored state is right either way; closing it entirely
+	/// would mean delivering the delegate's calls from a queue of their own.
+	private func recordConnectionState(_ newConnectionState: ConnectionState) -> Bool {
+		connectionStateLock.lock()
+		defer { connectionStateLock.unlock() }
+
+		if hasBegunDisconnecting, newConnectionState.status != .disconnected {
+			return false
+		}
+
+		if newConnectionState.status == .disconnecting {
+			hasBegunDisconnecting = true
+		}
+
+		connectionStateStorage = newConnectionState
+
+		return true
 	}
 }
 
@@ -770,7 +895,10 @@ private extension VNCConnection {
                 return
 			}
 
-			updateConnectionState(.connected)
+			// Refused when `disconnect()` got in while the last write was
+			// completing. The session is over by then, so there is nothing to
+			// announce and no loop to start.
+			guard updateConnectionState(.connected) else { return }
 
 			startReceiveLoop()
 			startSendLoop()

@@ -12,6 +12,9 @@ final class SocketNetworkConnection: NetworkConnection {
 
     private var socket: Socket?
 
+    /// What `recv` brought back and no reader has taken yet. See "Reading".
+    private let received = ReceivedBytes()
+
     // This will be replaced when calling start. Calling any other method before start (which would use this placeholder queue) is a programmer error.
     private var queue = DispatchQueue(label: "PLACEHOLDER")
 
@@ -78,56 +81,132 @@ final class SocketNetworkConnection: NetworkConnection {
 }
 
 // MARK: - Reading
+//
+// Buffered. Every field the decoders read is its own `read` -- an RRE
+// subrectangle is five of them, a pixel and four UInt16s -- and each one used
+// to cost a hop onto `queue`, a `recv(2)` and a continuation resume, however
+// many bytes were already waiting in the kernel. Measured on Linux (debug
+// build, swift:6.2, four CPUs): one 256x512 RRE frame of 114,558
+// subrectangles, 1.37 MB, took 27-28 seconds to decode, about 48 microseconds
+// per read, where the same frame over NWConnection on macOS took 5.5. Now a
+// `recv` asks for up to 64 KiB, and reads are served from what it brought
+// back without leaving the caller's task until it runs out.
 extension SocketNetworkConnection: NetworkConnectionReading {
 	func read(minimumLength: Int,
               maximumLength: Int) async throws -> Data {
-        let queue = self.queue
-
         guard let socket else {
             throw Socket.Errors.socketCreationFailed(underlyingErrorCode: nil)
         }
 
-        let bufferSize = maximumLength
+        let wanted = max(minimumLength, 1)
+        let received = self.received
+
+        if let ready = received.take(minimumLength: wanted, maximumLength: maximumLength) {
+            return ready
+        }
+
+        let queue = self.queue
+        let chunkSize = max(ReceivedBytes.chunkSize, maximumLength)
 
 		return try await withCheckedThrowingContinuation { continuation in
             queue.async {
-                var buffer = [UInt8](repeating: 0, count: bufferSize)
-                let bytesRead = socket.receive(buffer: &buffer)
+                // Until the minimum is here: `minimumLength` is a promise to
+                // the caller, where a single `recv` used to return short and
+                // then fail the read as invalid data.
+                while received.count < wanted {
+                    var buffer = [UInt8](repeating: 0, count: chunkSize)
+                    let bytesRead = socket.receive(buffer: &buffer)
 
-                // Handle connection closure
-                if bytesRead == 0 {
-                    // TODO
-                    continuation.resume(throwing: Errors.connectionClosed)
+                    // Handle connection closure
+                    if bytesRead == 0 {
+                        continuation.resume(throwing: Errors.connectionClosed)
 
-                    return
+                        return
+                    }
+
+                    // Handle errors during receiving
+                    if bytesRead < 0 {
+                        continuation.resume(throwing: VNCError.protocol(.noData))
+
+                        return
+                    }
+
+                    received.append(buffer.prefix(bytesRead))
                 }
 
-                // Handle errors during receiving
-                if bytesRead < 0 {
-                    // let errorNumber = errno
-                    // print("Error: \(errorNumber.hexString())")
-
-                    continuation.resume(throwing: VNCError.protocol(.noData))
-
-                    return
-                }
-
-                // Slice the buffer to get only the received data
-                let receivedData = Array(buffer.prefix(.init(bytesRead)))
-                let receivedLength = receivedData.count
-
-                // Validate received data length
-                guard receivedLength >= minimumLength,
-                      receivedLength <= maximumLength else {
+                guard let data = received.take(minimumLength: wanted,
+                                               maximumLength: maximumLength) else {
                     continuation.resume(throwing: VNCError.protocol(.invalidData))
 
                     return
                 }
 
-                continuation.resume(returning: Data(receivedData))
+                continuation.resume(returning: data)
             }
         }
 	}
+}
+
+/// Bytes a `recv` brought back that no reader has taken yet.
+///
+/// Its own object, shared by reference with the closure that fills it, and
+/// locked: the fast path in `read` takes from it on the caller's task and the
+/// slow path fills it on `queue`. Reads are sequential, so the lock is never
+/// contended; it is there so that stays true by construction rather than by
+/// the callers' good behaviour. Spinlock where Foundation has no NSLock, as
+/// elsewhere in the kit.
+private final class ReceivedBytes: @unchecked Sendable {
+    /// How much one `recv` asks for.
+    static let chunkSize = 64 * 1024
+
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+    private let lock = Spinlock()
+#else
+    private let lock = NSLock()
+#endif
+
+    private var bytes = [UInt8]()
+    private var offset = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+
+        return bytes.count - offset
+    }
+
+    func append(_ more: ArraySlice<UInt8>) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        bytes.append(contentsOf: more)
+    }
+
+    /// Up to `maximumLength` bytes, or `nil` if fewer than `minimumLength`
+    /// are waiting.
+    func take(minimumLength: Int, maximumLength: Int) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let available = bytes.count - offset
+
+        guard available >= minimumLength, available > 0 else { return nil }
+
+        let taken = min(available, maximumLength)
+        let data = Data(bytes[offset..<(offset + taken)])
+
+        offset += taken
+
+        if offset == bytes.count {
+            bytes.removeAll(keepingCapacity: true)
+            offset = 0
+        } else if offset >= Self.chunkSize {
+            bytes.removeFirst(offset)
+            offset = 0
+        }
+
+        return data
+    }
 }
 
 // MARK: - Writing

@@ -320,7 +320,7 @@ public final class VNCConnection: NSObjectOrAnyObject {
 	let clipboard: VNCClipboard
 	let clipboardMonitor: VNCClipboardMonitor
 
-	var clientToServerMessageQueue = Queue<VNCSendableMessage>()
+	let clientToServerMessageQueue = Queue<VNCSendableMessage>()
 
     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
 
@@ -576,9 +576,11 @@ extension VNCConnection {
 	}
 
 	func beginDisconnecting(error: Error? = nil) {
-		guard !state.disconnectRequested else { return }
+		// Test and set in one step. Reading the flag and then writing it left a
+		// gap in which a second caller could pass the same guard, and both would
+		// go on to cancel the connection and post `.disconnecting`.
+		guard state.requestDisconnect() else { return }
 
-		state.disconnectRequested = true
 		updateConnectionState(.disconnecting)
 
 		connection.setStatusUpdateHandler(nil)

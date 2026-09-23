@@ -100,8 +100,17 @@ final class Socket: Sendable {
         }
     }
 
-    func receive(buffer: inout [UInt8]) -> Int {
+    /// What `recv(2)` returned and, when that was -1, the error it reported.
+    ///
+    /// The error is taken here, straight after the call and on the thread
+    /// that made it. `errno` is per thread and the next call into the C
+    /// library may overwrite it, so a caller cannot read it later. It used to
+    /// be thrown away, and a connection reset on Linux reached the embedder as
+    /// `VNCError.protocol(.noData)` -- "No Data was retrieved" -- which says
+    /// neither that the network failed nor how.
+    func receive(buffer: inout [UInt8]) -> (count: Int, errorCode: Int32) {
         let bufferSize = buffer.count
+        var errorCode: Int32 = 0
 
         let bytesRead: Int = buffer.withUnsafeMutableBytes { bufferPtr in
             guard let bufferPtrAddr = bufferPtr.baseAddress else {
@@ -115,14 +124,21 @@ final class Socket: Sendable {
                 0
             )
 
+            if ret < 0 {
+                errorCode = Self.lastErrorCode()
+            }
+
             return .init(ret)
         }
 
-        return bytesRead
+        return (bytesRead, errorCode)
     }
 
-    func send(buffer: [UInt8]) -> Int {
+    /// What `send(2)` returned and, when that was -1, the error it reported.
+    /// See `receive(buffer:)` for why the error is taken here.
+    func send(buffer: [UInt8]) -> (count: Int, errorCode: Int32) {
         let bufferCount = buffer.count
+        var errorCode: Int32 = 0
 
         let bytesSent: Int = buffer.withUnsafeBytes { bufferPtr in
             guard let bufferPtrAddr = bufferPtr.baseAddress else {
@@ -168,10 +184,35 @@ final class Socket: Sendable {
             )
 #endif
 
+            if ret < 0 {
+                errorCode = Self.lastErrorCode()
+            }
+
             return .init(ret)
         }
 
-        return bytesSent
+        return (bytesSent, errorCode)
+    }
+
+    /// The error the last failed socket call on this thread reported.
+    private static func lastErrorCode() -> Int32 {
+#if canImport(WinSDK)
+        WSAGetLastError()
+#else
+        errno
+#endif
+    }
+
+    /// A socket error code as a person would want to read it, for example
+    /// "Connection reset by peer (errno 104)".
+    static func describe(errorCode: Int32) -> String {
+#if canImport(WinSDK)
+        // Windows Sockets codes are not errno values, and `strerror` does not
+        // know them.
+        "Windows Sockets error \(errorCode)"
+#else
+        "\(String(cString: strerror(errorCode))) (errno \(errorCode))"
+#endif
     }
 
     deinit {

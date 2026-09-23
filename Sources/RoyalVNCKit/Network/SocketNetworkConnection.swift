@@ -115,7 +115,7 @@ extension SocketNetworkConnection: NetworkConnectionReading {
                 // then fail the read as invalid data.
                 while received.count < wanted {
                     var buffer = [UInt8](repeating: 0, count: chunkSize)
-                    let bytesRead = socket.receive(buffer: &buffer)
+                    let (bytesRead, errorCode) = socket.receive(buffer: &buffer)
 
                     // Handle connection closure
                     if bytesRead == 0 {
@@ -124,9 +124,14 @@ extension SocketNetworkConnection: NetworkConnectionReading {
                         return
                     }
 
-                    // Handle errors during receiving
+                    // The error `recv` reported, kept. This used to throw
+                    // `VNCError.protocol(.noData)` for every failure, so a
+                    // server resetting the connection read as a protocol
+                    // fault -- "No Data was retrieved" -- and nothing said
+                    // what the network had done. NWConnection hands over its
+                    // error as it is; this now says as much.
                     if bytesRead < 0 {
-                        continuation.resume(throwing: VNCError.protocol(.noData))
+                        continuation.resume(throwing: Errors.receiveFailed(underlyingErrorCode: errorCode))
 
                         return
                     }
@@ -221,10 +226,10 @@ extension SocketNetworkConnection: NetworkConnectionWriting {
 		return try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 let bytesToSend = [UInt8](data)
-                let bytesSent = socket.send(buffer: bytesToSend)
+                let (bytesSent, errorCode) = socket.send(buffer: bytesToSend)
 
                 if bytesSent < 0 {
-                    continuation.resume(throwing: Errors.sendFailed)
+                    continuation.resume(throwing: Errors.sendFailed(underlyingErrorCode: errorCode))
                 } else {
                     continuation.resume()
                 }
@@ -236,17 +241,30 @@ extension SocketNetworkConnection: NetworkConnectionWriting {
 // MARK: - Errors
 private extension SocketNetworkConnection {
     // MARK: - Enum for Socket Errors
-    enum Errors: LocalizedError {
-        case sendFailed
+    //
+    // Also `CustomStringConvertible`, with the same text. An embedder that
+    // interpolates the error it was handed -- `"\(error)"` -- would otherwise
+    // get `receiveFailed(underlyingErrorCode: 104)`, and the point of keeping
+    // the code is that the message says what happened: "Receive failed:
+    // Connection reset by peer (errno 104)".
+    enum Errors: LocalizedError, CustomStringConvertible {
+        case sendFailed(underlyingErrorCode: Int32)
+        case receiveFailed(underlyingErrorCode: Int32)
         case connectionClosed
 
         var errorDescription: String? {
             switch self {
-                case .sendFailed:
-                    "Send failed"
+                case .sendFailed(let underlyingErrorCode):
+                    "Send failed: \(Socket.describe(errorCode: underlyingErrorCode))"
+                case .receiveFailed(let underlyingErrorCode):
+                    "Receive failed: \(Socket.describe(errorCode: underlyingErrorCode))"
                 case .connectionClosed:
                     "Connection closed"
             }
+        }
+
+        var description: String {
+            errorDescription ?? "Socket error"
         }
     }
 }

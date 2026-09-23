@@ -46,6 +46,24 @@ final class Socket: Sendable {
 
         self.addressInfo = addressInfo
         self.nativeSocket = nativeSocket
+
+#if canImport(Darwin)
+        // Writing to a peer that has hung up raises SIGPIPE, and the default
+        // action ends the process -- the embedder's whole app, for a server
+        // that went away. Not a failure a library gets to impose on its host;
+        // the write should fail with EPIPE instead and be reported like any
+        // other error. Darwin suppresses it per socket, here; Linux and Android
+        // have no such option and suppress it per call, with MSG_NOSIGNAL in
+        // `send` below. Windows has no SIGPIPE.
+        //
+        // (Apple platforms read and write through NWConnection, which handles
+        // this itself, so on Darwin this socket is a fallback nothing takes
+        // today. It is set anyway so the class is safe wherever it is used.)
+        var on: Int32 = 1
+
+        _ = setsockopt(nativeSocket, SOL_SOCKET, SO_NOSIGPIPE,
+                       &on, socklen_t(MemoryLayout<Int32>.size))
+#endif
     }
 
     func connect() throws(Errors) {
@@ -111,19 +129,28 @@ final class Socket: Sendable {
                 return -1
             }
 
+            // MSG_NOSIGNAL on Linux and Android: without it a send to a peer
+            // that has already reset the connection raises SIGPIPE, whose
+            // default action kills the process, before `send` can return the
+            // EPIPE the caller would have reported. Measured from the
+            // embedder: a suite whose servers die mid-handshake, run on its
+            // own on Linux with nothing else in the process ignoring SIGPIPE,
+            // died with "unexpected signal code 13" in every run. Darwin sets
+            // SO_NOSIGPIPE on the socket in `init` instead, and has no
+            // MSG_NOSIGNAL.
 #if canImport(Glibc)
             let ret = Glibc.send(
                 nativeSocket,
                 bufferPtrAddr,
                 .init(bufferCount),
-                0
+                Int32(MSG_NOSIGNAL)
             )
 #elseif canImport(Android)
             let ret = Android.send(
                 nativeSocket,
                 bufferPtrAddr,
                 .init(bufferCount),
-                0
+                Int32(MSG_NOSIGNAL)
             )
 #elseif canImport(Darwin)
             let ret = Darwin.send(

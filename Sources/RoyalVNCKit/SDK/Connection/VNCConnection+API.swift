@@ -21,6 +21,19 @@ public extension VNCConnection {
 	}
 }
 
+// MARK: - Clipboard, for embedders that keep it themselves
+public extension VNCConnection {
+	/// Sends `text` to the server's clipboard (ClientCutText, RFC 6143 7.5.6),
+	/// for an embedder that watches the local clipboard itself -- on Windows and
+	/// Linux, where the kit's clipboard monitor has no clipboard to watch. The
+	/// text is encoded exactly as the kit's own clipboard text is (see
+	/// `VNCProtocol.ClientCutText`). The other direction is
+	/// `serverClipboardTextHandler`.
+	func sendClipboardText(_ text: String) {
+		enqueueClientCutTextMessage(text)
+	}
+}
+
 public extension VNCConnection {
 #if canImport(ObjectiveC)
     @objc

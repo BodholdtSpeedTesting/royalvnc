@@ -341,6 +341,23 @@ public final class VNCConnection: NSObjectOrAnyObject {
 		}
 	}
 
+	/// Text the server has put on its clipboard (ServerCutText, RFC 6143
+	/// 7.6.4), for an embedder that keeps the local clipboard itself.
+	///
+	/// The kit's own clipboard is AppKit/UIKit only, so on Windows and Linux a
+	/// server's clipboard had nowhere to go: `VNCClipboard.text` is a no-op
+	/// there, and nothing else saw the text. This hands it over as received --
+	/// whether or not `Settings.isClipboardRedirectionEnabled` is set, since an
+	/// embedder doing its own clipboard has no use for the kit's. Called on the
+	/// connection's receive task. Set before `connect()`; the other direction is
+	/// `sendClipboardText(_:)`.
+	public var serverClipboardTextHandler: (@Sendable (_ text: String) -> Void)? {
+		didSet {
+			precondition(!hasCreatedConnection,
+						 "serverClipboardTextHandler must be set before connect()")
+		}
+	}
+
 	// MARK: - Private Properties
 	private var hasCreatedConnection = false
 

@@ -523,6 +523,7 @@ private extension VNCConnection {
 		state.framebufferWidth = serverInit.framebufferWidth
 		state.framebufferHeight = serverInit.framebufferHeight
 		state.desktopName = serverInit.name
+		desktopName = serverInit.name
 
 		let serverPixelFormat = serverInit.pixelFormat
 

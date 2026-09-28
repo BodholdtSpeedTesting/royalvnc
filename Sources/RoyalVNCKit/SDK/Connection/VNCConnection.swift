@@ -195,6 +195,34 @@ public final class VNCConnection: NSObjectOrAnyObject {
 #endif
 	private var negotiatedSecurityMethodStorage: VNCSecurityMethod?
 
+	/// The desktop name the server gave: in ServerInit, and again whenever it
+	/// changes it through the DesktopName pseudo-encoding.
+	///
+	/// `nil` until ServerInit. Readable from any thread, and guarded, for the same
+	/// reason as ``negotiatedSecurityMethod``: it is written on the connection's
+	/// task and read by an embedder somewhere else -- to title a window, or to
+	/// decide whether the server is the kind it knows how to talk to beyond RFB.
+	public internal(set) var desktopName: String? {
+		get {
+			desktopNameLock.lock()
+			defer { desktopNameLock.unlock() }
+
+			return desktopNameStorage
+		}
+		set {
+			desktopNameLock.lock()
+			desktopNameStorage = newValue
+			desktopNameLock.unlock()
+		}
+	}
+
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let desktopNameLock = Spinlock()
+#else
+	private let desktopNameLock = NSLock()
+#endif
+	private var desktopNameStorage: String?
+
 	/// Every security type the server offered, as the raw numbers on the wire.
 	///
 	/// ``negotiatedSecurityMethod`` answers "what did we agree on", and is `nil`

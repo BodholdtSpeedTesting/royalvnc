@@ -15,6 +15,7 @@ extension VNCConnection: VNCFramebufferDelegate {
 	func framebuffer(_ framebuffer: VNCFramebuffer,
 					 didUpdateDesktopName newDesktopName: String) {
 		state.desktopName = newDesktopName
+		desktopName = newDesktopName
 	}
 
 	func framebuffer(_ framebuffer: VNCFramebuffer,

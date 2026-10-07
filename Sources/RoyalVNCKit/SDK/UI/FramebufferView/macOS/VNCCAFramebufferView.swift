@@ -104,6 +104,9 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
     @objc
 	public var lastModifierFlags: NSEvent.ModifierFlags = [ ]
 
+	/// What each held key sent at its key-down, so that its key-up sends the same.
+	private var heldKeyCodes = HeldKeyCodes()
+
 	public override var canBecomeKeyView: Bool { true }
 	public override var acceptsFirstResponder: Bool { true }
 
@@ -493,26 +496,39 @@ extension VNCCAFramebufferView {
 		}
 	}
 
+	/// A key goes down as what it types now (`keyCodesFrom(event:)`), and is remembered by its
+	/// key code; an auto-repeat re-sends what its press sent (HeldKeyCodes).
 	func handleKeyDown(with event: NSEvent?) {
 		guard let event,
               let connection else {
 			return
 		}
 
-		let keyCodes = keyCodesFrom(event: event)
+		let keys = heldKeyCodes.keyDown(event.keyCode,
+										isARepeat: event.isARepeat) {
+			keyCodesFrom(event: event)
+		}
 
-		for keyCode in keyCodes {
+		for keyCode in keys.released {
+			connection.keyUp(keyCode)
+		}
+
+		for keyCode in keys.pressed {
 			connection.keyDown(keyCode)
 		}
 	}
 
+	/// A key comes up as exactly what its key-down sent, whatever it would type now; a key this
+	/// view never saw go down, as its `charactersIgnoringModifiers`, as every key-up was before.
 	func handleKeyUp(with event: NSEvent?) {
 		guard let event,
               let connection else {
 			return
 		}
 
-		let keyCodes = keyCodesFrom(event: event)
+		let keyCodes = heldKeyCodes.keyUp(event.keyCode) {
+			keyCodesIgnoringModifiersFrom(event: event)
+		}
 
 		for keyCode in keyCodes {
 			connection.keyUp(keyCode)
@@ -558,13 +574,22 @@ extension VNCCAFramebufferView {
 		return true
 	}
 
+	/// What a key event types: its `characters` (Shift and Caps Lock applied), or with
+	/// Command, Control or Option held its `charactersIgnoringModifiers`
+	/// (`VNCKeyCode.keyCodesFrom(cgKeyCode:characters:charactersIgnoringModifiers:modifierFlags:)`).
 	func keyCodesFrom(event: NSEvent) -> [VNCKeyCode] {
-		let characters = event.charactersIgnoringModifiers
-		let keyCode = CGKeyCode(event.keyCode)
+		logIfUnconvertable(VNCKeyCode.keyCodesFrom(event: event),
+						   event: event)
+	}
 
-		let keys = VNCKeyCode.keyCodesFrom(cgKeyCode: keyCode,
-										   characters: characters)
+	/// A key event as its `charactersIgnoringModifiers`, whatever the modifiers.
+	func keyCodesIgnoringModifiersFrom(event: NSEvent) -> [VNCKeyCode] {
+		logIfUnconvertable(VNCKeyCode.keyCodesIgnoringModifiersFrom(event: event),
+						   event: event)
+	}
 
+	private func logIfUnconvertable(_ keys: [VNCKeyCode],
+									event: NSEvent) -> [VNCKeyCode] {
 		if keys.isEmpty {
 			connection?.logger.logError("Ignoring unconvertable key press (Key Code: \(event.keyCode))")
 		}

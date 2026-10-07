@@ -102,6 +102,17 @@ let package = Package(
         .executableTarget(
             name: "RoyalVNCKitCDemo",
             dependencies: [ "RoyalVNCKit" ]
+        ),
+
+        // The kit's own tests: `swift test`. A test target is never built for a package that
+        // depends on this one.
+        .testTarget(
+            name: "RoyalVNCKitTests",
+            dependencies: [ "RoyalVNCKit" ],
+
+            swiftSettings: [
+                .swiftLanguageMode(swiftLanguageMode)
+            ]
         )
     ]
 )

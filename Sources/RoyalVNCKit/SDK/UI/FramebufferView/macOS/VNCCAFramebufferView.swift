@@ -107,6 +107,10 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	/// What each held key sent at its key-down, so that its key-up sends the same.
 	private var heldKeyCodes = HeldKeyCodes()
 
+	/// Whether the last key to go down, modifiers aside, was a dead key, so that the key after it
+	/// goes as it did before (`keyCodesFrom(event:)`).
+	private var lastKeyWasDeadKey = false
+
 	public override var canBecomeKeyView: Bool { true }
 	public override var acceptsFirstResponder: Bool { true }
 
@@ -575,11 +579,21 @@ extension VNCCAFramebufferView {
 	}
 
 	/// What a key event types: its `characters` (Shift and Caps Lock applied), or with
-	/// Command, Control or Option held its `charactersIgnoringModifiers`
-	/// (`VNCKeyCode.keyCodesFrom(cgKeyCode:characters:charactersIgnoringModifiers:modifierFlags:)`).
+	/// Command, Control or Option held, for a dead key and for the key after one, its
+	/// `charactersIgnoringModifiers`
+	/// (`VNCKeyCode.keyCodesFrom(cgKeyCode:characters:charactersIgnoringModifiers:modifierFlags:completingDeadKey:)`).
+	/// Every key but a modifier says whether it is a dead key, for the key after it.
 	func keyCodesFrom(event: NSEvent) -> [VNCKeyCode] {
-		logIfUnconvertable(VNCKeyCode.keyCodesFrom(event: event),
-						   event: event)
+		let keys = VNCKeyCode.keyCodesFrom(event: event,
+										   completingDeadKey: lastKeyWasDeadKey)
+
+		if !VNCKeyCode.isModifier(cgKeyCode: CGKeyCode(event.keyCode)) {
+			lastKeyWasDeadKey = VNCKeyCode.isDeadKey(characters: event.characters,
+													 charactersIgnoringModifiers: event.charactersIgnoringModifiers)
+		}
+
+		return logIfUnconvertable(keys,
+								  event: event)
 	}
 
 	/// A key event as its `charactersIgnoringModifiers`, whatever the modifiers.

@@ -80,6 +80,54 @@ final class MacKeyEventKeyCodesTests: XCTestCase {
 		XCTAssertEqual(sent(keyEvent(.keyDown, Key.a, "", ignoring: "")), [ ], "a key that types nothing sends nothing")
 	}
 
+	func testTheKeyAfterADeadKeySendsTheCharacterIgnoringModifiers() {
+		func completing(_ keyCode: UInt16, _ characters: String, ignoring: String,
+						flags: NSEvent.ModifierFlags = [ ]) -> [UInt32] {
+			VNCKeyCode.keyCodesFrom(cgKeyCode: CGKeyCode(keyCode),
+									characters: characters,
+									charactersIgnoringModifiers: ignoring,
+									modifierFlags: flags,
+									completingDeadKey: true).map(\.rawValue)
+		}
+
+		XCTAssertEqual(completing(Key.e, "é", ignoring: "e"), [ 0x65 ],
+					   "Option-e then e: the server was sent the dead key, and composes; not the accent twice")
+		XCTAssertEqual(completing(Key.e, "ê", ignoring: "e"), [ 0x65 ], "the '^' dead key, then e")
+		XCTAssertEqual(completing(Key.e, "Ê", ignoring: "E", flags: .shift), [ 0x45 ], "Shift as it applies")
+		XCTAssertEqual(completing(Key.e, "Ê", ignoring: "e", flags: .capsLock), [ 0x65 ],
+					   "as before: charactersIgnoringModifiers has no Caps Lock")
+		XCTAssertEqual(completing(Key.a, "^a", ignoring: "a"), [ 0x61 ],
+					   "a key the dead key does not compose with: the dead key went on its own")
+		XCTAssertEqual(completing(Key.a, "\u{1}", ignoring: "a", flags: .control), [ 0x61 ], "a shortcut as ever")
+		XCTAssertEqual(completing(Key.leftArrow, "\u{F702}", ignoring: "\u{F702}", flags: [ .numericPad, .function ]),
+					   [ 0xff51 ], "a key with a keysym of its own as ever")
+		XCTAssertEqual(sent(keyEvent(.keyDown, Key.e, "é", ignoring: "e")), [ 0xe9 ],
+					   "not after a dead key: what it types (completingDeadKey defaults to false)")
+	}
+
+	func testADeadKeyHasNoCharactersButACharacterIgnoringModifiers() {
+		XCTAssertTrue(VNCKeyCode.isDeadKey(characters: "", charactersIgnoringModifiers: "e"), "Option-e")
+		XCTAssertTrue(VNCKeyCode.isDeadKey(characters: "", charactersIgnoringModifiers: "^"), "French '^'")
+		XCTAssertFalse(VNCKeyCode.isDeadKey(characters: "", charactersIgnoringModifiers: ""),
+					   "nothing on the level in use (Apple's Hebrew with Shift)")
+		XCTAssertFalse(VNCKeyCode.isDeadKey(characters: nil, charactersIgnoringModifiers: nil))
+		XCTAssertFalse(VNCKeyCode.isDeadKey(characters: "´", charactersIgnoringModifiers: "E"),
+					   "Option-Shift-e: \"the standard accent\", no dead key")
+		XCTAssertFalse(VNCKeyCode.isDeadKey(characters: "é", charactersIgnoringModifiers: "e"), "the key that completes one")
+	}
+
+	func testTheModifierKeyCodes() {
+		// kVK_Command, kVK_Shift, kVK_CapsLock, kVK_Option, kVK_Control, kVK_RightShift, kVK_RightOption,
+		// kVK_RightControl, kVK_Function, kVK_RightCommand.
+		for keyCode: UInt16 in [ 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x36 ] {
+			XCTAssertTrue(VNCKeyCode.isModifier(cgKeyCode: CGKeyCode(keyCode)), "0x\(String(keyCode, radix: 16))")
+		}
+
+		for keyCode in [ Key.a, Key.e, Key.space, Key.leftArrow, Key.keypad5, Key.leftBracket, 0x24, 0x33, 0x35 ] {
+			XCTAssertFalse(VNCKeyCode.isModifier(cgKeyCode: CGKeyCode(keyCode)), "0x\(String(keyCode, radix: 16))")
+		}
+	}
+
 	func testAKeyWithAKeysymOfItsOwnIgnoresItsStrings() {
 		XCTAssertEqual(sent(keyEvent(.keyDown, Key.leftArrow, "\u{F702}", ignoring: "\u{F702}",
 									 flags: [ .numericPad, .function ])), [ 0xff51 ])
@@ -336,6 +384,84 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		up(Key.leftBracket, "", ignoring: "^")
 
 		XCTAssertEqual(sent(), [ "down 0xffe9", "down 0x65", "up 0x65", "up 0xffe9", "down 0x5e", "up 0x5e" ])
+	}
+
+	func testTheKeyAfterADeadKeyGoesAsBefore() {
+		// Option-e then e: AppKit composes 'é' into the e key's characters; the server, sent Option and
+		// e, composes for itself.
+		flags(0x3a, [ .option, .leftOption ])
+		down(Key.e, "", ignoring: "e", flags: [ .option, .leftOption ])
+		up(Key.e, "", ignoring: "e", flags: [ .option, .leftOption ])
+		flags(0x3a, [ ])
+		down(Key.e, "é", ignoring: "e")
+		up(Key.e, "é", ignoring: "e")
+		// The French '^' dead key, then e: '^' and e, not '^' and 'ê'.
+		down(Key.leftBracket, "", ignoring: "^")
+		up(Key.leftBracket, "", ignoring: "^")
+		down(Key.e, "ê", ignoring: "e")
+		up(Key.e, "ê", ignoring: "e")
+
+		XCTAssertEqual(sent(), [ "down 0xffe9", "down 0x65", "up 0x65", "up 0xffe9", "down 0x65", "up 0x65",
+								 "down 0x5e", "up 0x5e", "down 0x65", "up 0x65" ])
+	}
+
+	func testAModifierBetweenADeadKeyAndItsKeyLeavesItTheKeyAfter() {
+		// '^', then Shift, then E: 'E', Shift applied, not 'Ê'.
+		down(Key.leftBracket, "", ignoring: "^")
+		up(Key.leftBracket, "", ignoring: "^")
+		flags(Key.shift, [ .shift, .leftShift ])
+		down(Key.e, "Ê", ignoring: "E", flags: [ .shift, .leftShift ])
+		up(Key.e, "Ê", ignoring: "E", flags: [ .shift, .leftShift ])
+		flags(Key.shift, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0x5e", "up 0x5e", "down 0xffe1", "down 0x45", "up 0x45", "up 0xffe1" ])
+	}
+
+	func testOnlyTheOneKeyAfterADeadKeyGoesAsBefore() {
+		// '^' then e, then a with Caps Lock: 'A', what it types.
+		down(Key.leftBracket, "", ignoring: "^")
+		up(Key.leftBracket, "", ignoring: "^")
+		down(Key.e, "ê", ignoring: "e")
+		up(Key.e, "ê", ignoring: "e")
+		down(Key.a, "A", ignoring: "a", flags: .capsLock)
+		up(Key.a, "A", ignoring: "a", flags: .capsLock)
+
+		XCTAssertEqual(sent(), [ "down 0x5e", "up 0x5e", "down 0x65", "up 0x65", "down 0x41", "up 0x41" ])
+	}
+
+	func testAKeyWithAKeysymOfItsOwnEndsADeadKey() {
+		// '^', the left arrow, then a with Caps Lock: 'A'.
+		down(Key.leftBracket, "", ignoring: "^")
+		up(Key.leftBracket, "", ignoring: "^")
+		down(Key.leftArrow, "\u{F702}", ignoring: "\u{F702}", flags: [ .numericPad, .function ])
+		up(Key.leftArrow, "\u{F702}", ignoring: "\u{F702}", flags: [ .numericPad, .function ])
+		down(Key.a, "A", ignoring: "a", flags: .capsLock)
+		up(Key.a, "A", ignoring: "a", flags: .capsLock)
+
+		XCTAssertEqual(sent(), [ "down 0x5e", "up 0x5e", "down 0xff51", "up 0xff51", "down 0x41", "up 0x41" ])
+	}
+
+	func testARepeatOfADeadKeyLeavesTheKeyAfterIt() {
+		// '^' held until it repeats: the repeat re-sends the press, and the e after it is still the key after.
+		down(Key.leftBracket, "", ignoring: "^")
+		down(Key.leftBracket, "", ignoring: "^", repeat: true)
+		up(Key.leftBracket, "", ignoring: "^")
+		down(Key.e, "ê", ignoring: "e")
+		up(Key.e, "ê", ignoring: "e")
+
+		XCTAssertEqual(sent(), [ "down 0x5e", "down 0x5e", "up 0x5e", "down 0x65", "up 0x65" ])
+	}
+
+	func testAKeyWithNothingOnItsLevelIsNoDeadKey() {
+		// Apple's Hebrew, Shift on a letter key: nothing. Then a with Caps Lock: 'A'.
+		flags(Key.shift, [ .shift, .leftShift ])
+		down(Key.a, "", ignoring: "", flags: [ .shift, .leftShift ])
+		up(Key.a, "", ignoring: "", flags: [ .shift, .leftShift ])
+		flags(Key.shift, [ ])
+		down(Key.e, "E", ignoring: "e", flags: .capsLock)
+		up(Key.e, "E", ignoring: "e", flags: .capsLock)
+
+		XCTAssertEqual(sent(), [ "down 0xffe1", "up 0xffe1", "down 0x45", "up 0x45" ])
 	}
 
 	func testAKeyThatTypedNothingComesUpAsNothing() {

@@ -104,7 +104,8 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
     @objc
 	public var lastModifierFlags: NSEvent.ModifierFlags = [ ]
 
-	/// What each held key sent at its key-down, so that its key-up sends the same.
+	/// What each held key sent going down (its press, or a repeat that changed it), so that its
+	/// key-up sends the same.
 	private var heldKeyCodes = HeldKeyCodes()
 
 	/// Whether the last key to go down, modifiers aside, was a dead key, so that the key after it
@@ -501,7 +502,9 @@ extension VNCCAFramebufferView {
 	}
 
 	/// A key goes down as what it types now (`keyCodesFrom(event:)`), and is remembered by its
-	/// key code; an auto-repeat re-sends what its press sent (HeldKeyCodes).
+	/// key code; an auto-repeat sends what the key types now too, letting go of what its press
+	/// sent where that has changed (HeldKeyCodes). A repeat is no new key: it is worked out
+	/// without the view's dead-key bookkeeping, which it leaves as it is.
 	func handleKeyDown(with event: NSEvent?) {
 		guard let event,
               let connection else {
@@ -510,7 +513,9 @@ extension VNCCAFramebufferView {
 
 		let keys = heldKeyCodes.keyDown(event.keyCode,
 										isARepeat: event.isARepeat) {
-			keyCodesFrom(event: event)
+			event.isARepeat
+				? VNCKeyCode.keyCodesFrom(event: event)
+				: keyCodesFrom(event: event)
 		}
 
 		for keyCode in keys.released {
@@ -578,8 +583,9 @@ extension VNCCAFramebufferView {
 		return true
 	}
 
-	/// What a key event types: its `characters` (Shift and Caps Lock applied), or with
-	/// Command, Control or Option held, for a dead key and for the key after one, its
+	/// What a key event types: its `characters` (Shift and Caps Lock applied) where that is the
+	/// key's own character, or with Command, Control or Option held, for a dead key, for the key
+	/// after one, and where `characters` carries a pending dead key or a capital beyond ASCII, its
 	/// `charactersIgnoringModifiers`
 	/// (`VNCKeyCode.keyCodesFrom(cgKeyCode:characters:charactersIgnoringModifiers:modifierFlags:completingDeadKey:)`).
 	/// Every key but a modifier says whether it is a dead key, for the key after it.

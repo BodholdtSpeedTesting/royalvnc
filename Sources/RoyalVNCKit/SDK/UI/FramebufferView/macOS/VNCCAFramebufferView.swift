@@ -112,6 +112,12 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	/// goes as it did before (`keyCodesFrom(event:)`).
 	private var lastKeyWasDeadKey = false
 
+	/// What a key event's key types at its Shift and Caps Lock alone, with no dead key pending, which
+	/// tells its own character from what a pending dead key put in its `characters`: the current
+	/// layout's (`VNCKeyCode.charactersWithoutDeadKeys(of:)`). Tests, which may not select a layout,
+	/// give a named layout's here.
+	var charactersWithoutDeadKeys: (NSEvent) -> String? = VNCKeyCode.charactersWithoutDeadKeys(of:)
+
 	public override var canBecomeKeyView: Bool { true }
 	public override var acceptsFirstResponder: Bool { true }
 
@@ -514,7 +520,8 @@ extension VNCCAFramebufferView {
 		let keys = heldKeyCodes.keyDown(event.keyCode,
 										isARepeat: event.isARepeat) {
 			event.isARepeat
-				? VNCKeyCode.keyCodesFrom(event: event)
+				? VNCKeyCode.keyCodesFrom(event: event,
+										  charactersWithoutDeadKeys: charactersWithoutDeadKeys(event))
 				: keyCodesFrom(event: event)
 		}
 
@@ -584,13 +591,16 @@ extension VNCCAFramebufferView {
 	}
 
 	/// What a key event types: its `characters` (Shift and Caps Lock applied) where that is the
-	/// key's own character, or with Command, Control or Option held, for a dead key, for the key
-	/// after one, and where `characters` carries a pending dead key or a capital beyond ASCII, its
+	/// key's own character -- its `charactersIgnoringModifiers`, or what it types at its Shift and
+	/// Caps Lock with no dead key pending (`charactersWithoutDeadKeys`) within Latin-1; or with
+	/// Command, Control or Option held, for a dead key, for the key after one, and where
+	/// `characters` carries a pending dead key or a character beyond Latin-1, its
 	/// `charactersIgnoringModifiers`
-	/// (`VNCKeyCode.keyCodesFrom(cgKeyCode:characters:charactersIgnoringModifiers:modifierFlags:completingDeadKey:)`).
+	/// (`VNCKeyCode.keyCodesFrom(cgKeyCode:characters:charactersIgnoringModifiers:charactersWithoutDeadKeys:modifierFlags:completingDeadKey:)`).
 	/// Every key but a modifier says whether it is a dead key, for the key after it.
 	func keyCodesFrom(event: NSEvent) -> [VNCKeyCode] {
 		let keys = VNCKeyCode.keyCodesFrom(event: event,
+										   charactersWithoutDeadKeys: charactersWithoutDeadKeys(event),
 										   completingDeadKey: lastKeyWasDeadKey)
 
 		if !VNCKeyCode.isModifier(cgKeyCode: CGKeyCode(event.keyCode)) {

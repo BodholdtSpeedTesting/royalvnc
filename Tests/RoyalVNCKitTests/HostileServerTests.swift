@@ -226,6 +226,204 @@ final class HostileServerTests: XCTestCase {
 
 		XCTAssertNil(session.framebuffer.colorMap)
 	}
+
+	// MARK: - Hextile and ZRLE: tiles and subrectangles in Int, inside their tile (7.7.4, 7.7.6)
+
+	/// Four tiles -- 16x16, a narrower last column, a shorter last row -- each a different way:
+	/// background, foreground and one subrectangle; raw; coloured subrectangles; nothing, its
+	/// background carried over.
+	func testHextileTilesDecodeAsBefore() async throws {
+		let session = try TestSession(width: 32, height: 32, depth: 24)
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 1, y: 1, width: 20, height: 18, encoding: 5)
+
+		stream.u8(2 | 4 | 8) // BackgroundSpecified, ForegroundSpecified, AnySubrects
+		stream.pixel(0x10_10_10, bytesPerPixel: 4)
+		stream.pixel(0xf0_f0_f0, bytesPerPixel: 4)
+		stream.u8(1)
+		stream.u8(2 << 4 | 3); stream.u8(1 << 4 | 0) // at 2,3; 2x1
+
+		stream.u8(1) // Raw: 4x16
+		for index in 0..<64 {
+			stream.pixel(UInt32(index), bytesPerPixel: 4)
+		}
+
+		stream.u8(2 | 8 | 16) // BackgroundSpecified, AnySubrects, SubrectsColoured: 16x2
+		stream.pixel(0x20_20_20, bytesPerPixel: 4)
+		stream.u8(2)
+		stream.pixel(0xaa_00_00, bytesPerPixel: 4); stream.u8(0 << 4 | 0); stream.u8(0 << 4 | 1) // at 0,0; 1x2
+		stream.pixel(0x00_aa_00, bytesPerPixel: 4); stream.u8(15 << 4 | 1); stream.u8(0 << 4 | 0) // at 15,1; 1x1
+
+		stream.u8(0) // nothing: the last background, 4x2
+
+		try await session.receiveFramebufferUpdate(stream)
+
+		XCTAssertEqual(session.pixel(1, 1), 0x10_10_10)
+		XCTAssertEqual(session.pixel(3, 4), 0xf0_f0_f0)
+		XCTAssertEqual(session.pixel(4, 4), 0xf0_f0_f0)
+		XCTAssertEqual(session.pixel(5, 4), 0x10_10_10)
+		XCTAssertEqual(session.pixel(17, 1), 0)
+		XCTAssertEqual(session.pixel(20, 16), 63)
+		XCTAssertEqual(session.pixel(1, 17), 0xaa_00_00)
+		XCTAssertEqual(session.pixel(1, 18), 0xaa_00_00)
+		XCTAssertEqual(session.pixel(2, 17), 0x20_20_20)
+		XCTAssertEqual(session.pixel(16, 18), 0x00_aa_00)
+		XCTAssertEqual(session.pixel(20, 18), 0x20_20_20)
+		XCTAssertEqual(session.pixel(21, 18), 0, "drawn outside the rectangle")
+		XCTAssertEqual(session.pixel(1, 19), 0, "drawn outside the rectangle")
+	}
+
+	/// The last tile of a 20-pixel-wide rectangle is 4 wide; a subrectangle 2 wide at x 3 reaches
+	/// past it, into pixels the rectangle does not have. At 2ad33e2 it was drawn there.
+	func testHextileSubrectanglePastANarrowerLastTileIsRefused() async throws {
+		let session = try TestSession(width: 32, height: 32, depth: 24)
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 0, y: 0, width: 20, height: 16, encoding: 5)
+		stream.u8(2) // a solid first tile
+		stream.pixel(0x10_10_10, bytesPerPixel: 4)
+		stream.u8(4 | 8) // the 4x16 last tile: the background carried over, a foreground, a subrectangle
+		stream.pixel(0xf0_f0_f0, bytesPerPixel: 4)
+		stream.u8(1)
+		stream.u8(3 << 4 | 0); stream.u8(1 << 4 | 0) // at 3,0; 2x1
+
+		do {
+			try await session.receiveFramebufferUpdate(stream)
+
+			XCTFail("a subrectangle reaching past its tile was drawn")
+		} catch {
+			assertServerRefused(error, naming: "subrectangle")
+		}
+
+		XCTAssertEqual(session.pixel(20, 0), 0, "drawn outside the rectangle")
+	}
+
+	/// The last row of tiles of a 20-pixel-high rectangle is 4 high; a subrectangle 2 high at y 3
+	/// reaches past it, into pixels the rectangle does not have. At 2ad33e2 it was drawn there.
+	func testHextileSubrectanglePastAShorterLastRowIsRefused() async throws {
+		let session = try TestSession(width: 32, height: 32, depth: 24)
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 0, y: 0, width: 16, height: 20, encoding: 5)
+		stream.u8(2) // a solid first tile
+		stream.pixel(0x10_10_10, bytesPerPixel: 4)
+		stream.u8(4 | 8) // the 16x4 tile below it: the background carried over, a foreground, a subrectangle
+		stream.pixel(0xf0_f0_f0, bytesPerPixel: 4)
+		stream.u8(1)
+		stream.u8(0 << 4 | 3); stream.u8(0 << 4 | 1) // at 0,3; 1x2
+
+		do {
+			try await session.receiveFramebufferUpdate(stream)
+
+			XCTFail("a subrectangle reaching past its tile was drawn")
+		} catch {
+			assertServerRefused(error, naming: "subrectangle")
+		}
+
+		XCTAssertEqual(session.pixel(0, 20), 0, "drawn outside the rectangle")
+	}
+
+	/// A full tile is 16 wide; a subrectangle 2 wide at x 15 reaches past it, into the next tile.
+	func testHextileSubrectanglePastSixteenIsRefused() async throws {
+		let session = try TestSession(width: 32, height: 32, depth: 24)
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 0, y: 0, width: 32, height: 16, encoding: 5)
+		stream.u8(2 | 4 | 8)
+		stream.pixel(0x10_10_10, bytesPerPixel: 4)
+		stream.pixel(0xf0_f0_f0, bytesPerPixel: 4)
+		stream.u8(1)
+		stream.u8(15 << 4 | 15); stream.u8(1 << 4 | 0) // at 15,15; 2x1
+
+		do {
+			try await session.receiveFramebufferUpdate(stream)
+
+			XCTFail("a subrectangle reaching past 16 was drawn")
+		} catch {
+			assertServerRefused(error, naming: "subrectangle")
+		}
+	}
+
+	/// A rectangle ending at a 65535-pixel-wide framebuffer's right edge, its last tile 3 wide:
+	/// a subrectangle inside it is drawn at x 65534, and one at x 15, past it, is refused -- at
+	/// 2ad33e2 the tile's x plus 15 passed 65535 in UInt16, and trapped.
+	func testHextileAtTheEdgeOfA65535PixelWideFramebuffer() async throws {
+		let session = try TestSession(width: 65535, height: 16, depth: 24)
+
+		func update(subrectX: UInt8) -> ServerStream {
+			var stream = ServerStream()
+			stream.framebufferUpdateHeader(rectangles: 1)
+			stream.rectangle(x: 65500, y: 0, width: 35, height: 1, encoding: 5)
+			stream.u8(2)
+			stream.pixel(0x10_10_10, bytesPerPixel: 4)
+			stream.u8(0)
+			stream.u8(4 | 8)
+			stream.pixel(0xf0_f0_f0, bytesPerPixel: 4)
+			stream.u8(1)
+			stream.u8(subrectX << 4); stream.u8(0)
+
+			return stream
+		}
+
+		try await session.receiveFramebufferUpdate(update(subrectX: 2))
+
+		XCTAssertEqual(session.pixel(65534, 0), 0xf0_f0_f0)
+		XCTAssertEqual(session.pixel(65533, 0), 0x10_10_10)
+
+		do {
+			try await session.receiveFramebufferUpdate(update(subrectX: 15))
+
+			XCTFail("a subrectangle at x 15 of a 3-pixel-wide tile was accepted")
+		} catch {
+			assertServerRefused(error, naming: "subrectangle")
+		}
+	}
+
+	/// A rectangle as wide as a 65535-pixel-wide framebuffer: 4,096 tiles, the last 15 wide, the
+	/// first a background and the rest carrying it over. At 2ad33e2 the number of tiles, worked
+	/// out as the width plus 15 in UInt16, passed 65535 before a tile was read, and trapped.
+	func testHextileRectangleAs65535PixelsWideAsItsFramebufferDecodes() async throws {
+		let session = try TestSession(width: 65535, height: 1, depth: 24)
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 0, y: 0, width: 65535, height: 1, encoding: 5)
+		stream.u8(2)
+		stream.pixel(0x10_20_30, bytesPerPixel: 4)
+		stream.append([UInt8](repeating: 0, count: 4095))
+
+		try await session.receiveFramebufferUpdate(stream)
+
+		XCTAssertEqual(session.pixel(0, 0), 0x10_20_30)
+		XCTAssertEqual(session.pixel(65519, 0), 0x10_20_30)
+		XCTAssertEqual(session.pixel(65534, 0), 0x10_20_30)
+	}
+
+	/// A ZRLE rectangle whose one tile ends at a 65535-pixel-wide framebuffer's right edge. At
+	/// 2ad33e2 the next tile's x, 65472 plus 64, passed 65535 in UInt16, and trapped.
+	func testZRLEAtTheEdgeOfA65535PixelWideFramebuffer() async throws {
+		let session = try TestSession(width: 65535, height: 1, depth: 24)
+
+		var zlib = ZlibStoredStream()
+		let tiles = zlib.chunk([1, 0xcc, 0xbb, 0xaa]) // solid; a CPIXEL, least significant byte first
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 65472, y: 0, width: 63, height: 1, encoding: 16)
+		stream.u32(UInt32(tiles.count))
+		stream.append(tiles)
+
+		try await session.receiveFramebufferUpdate(stream)
+
+		XCTAssertEqual(session.pixel(65472, 0), 0xaa_bb_cc)
+		XCTAssertEqual(session.pixel(65534, 0), 0xaa_bb_cc)
+		XCTAssertEqual(session.pixel(65471, 0), 0, "drawn outside the rectangle")
+	}
 }
 
 // MARK: - A session's worth of decoding, without a connection

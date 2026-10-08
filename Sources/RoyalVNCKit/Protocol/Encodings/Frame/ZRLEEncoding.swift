@@ -80,30 +80,35 @@ extension VNCProtocol.ZRLEEncoding {
 
 		let stream = DataStream(data: decompressedData)
 
-		let rectangleWidth = rectangle.width
-		let rectangleHeight = rectangle.height
+		// In Int: the next tile's position, worked out in UInt16, passed 65535 after a tile
+		// within 64 of it, and trapped -- and a framebuffer that wide is one a DesktopSize can set.
+		let rectangleWidth = Int(rectangle.width)
+		let rectangleHeight = Int(rectangle.height)
 
-		let rectangleX = rectangle.xPosition
-		let rectangleY = rectangle.yPosition
+		let tileSize = Int(Self.tileSize)
 
-		let tileSize = Self.tileSize
+        var tileOffsetY = 0
 
-        var tileY = rectangleY
+        while tileOffsetY < rectangleHeight {
+			let tileHeight = min(tileSize, rectangleHeight - tileOffsetY)
 
-        while tileY < rectangleY + rectangleHeight {
-			let tileHeight = min(tileSize, rectangleY + rectangleHeight - tileY)
+            var tileOffsetX = 0
 
-            var tileX = rectangleX
-
-            while tileX < rectangleX + rectangleWidth {
-				let tileWidth = min(tileSize, rectangleX + rectangleWidth - tileX)
+            while tileOffsetX < rectangleWidth {
+				let tileWidth = min(tileSize, rectangleWidth - tileOffsetX)
 
 				let actualTileSize = tileWidth * tileHeight
 
-				let tileRegion = VNCRegion(x: tileX,
-										   y: tileY,
-										   width: tileWidth,
-										   height: tileHeight)
+				// RFC 6143 7.7.6: 64x64 tiles in left-to-right, top-to-bottom order, the last in
+				// a row and the last row smaller. A tile lies inside its rectangle by
+				// construction; only a rectangle reaching past 65535, which
+				// FramebufferUpdate.receive never lets through, can fail this.
+				guard let tileRegion = rectangle.subregion(x: tileOffsetX,
+														   y: tileOffsetY,
+														   width: tileWidth,
+														   height: tileHeight) else {
+					throw VNCError.protocol(.invalidData)
+				}
 
 //                logger.logDebug("Getting Subencoding of ZRLE Tile (Tile Region: \(tileRegion), Size: \(actualTileSize))")
 
@@ -127,15 +132,15 @@ extension VNCProtocol.ZRLEEncoding {
 					var data = try decodePaletteTile(stream: stream,
                                                      logger: logger,
 													 paletteSize: subencoding,
-													 tileSize: tileSize,
-													 tileWidth: tileWidth,
-													 tileHeight: tileHeight)
+													 tileSize: Self.tileSize,
+													 tileWidth: .init(tileWidth),
+													 tileHeight: .init(tileHeight))
 
 					framebuffer.update(region: tileRegion, data: &data)
 				} else if subencoding == 128 {
 					var data = try decodeRLETile(stream: stream,
                                                  logger: logger,
-												 tileSize: actualTileSize)
+												 tileSize: .init(actualTileSize))
 
 					framebuffer.update(region: tileRegion, data: &data)
 				} else if subencoding >= 130 && subencoding <= 255 {
@@ -144,17 +149,17 @@ extension VNCProtocol.ZRLEEncoding {
 					var data = try decodeRLEPaletteTile(stream: stream,
                                                         logger: logger,
 														paletteSize: paletteSize,
-														tileSize: actualTileSize)
+														tileSize: .init(actualTileSize))
 
 					framebuffer.update(region: tileRegion, data: &data)
 				} else {
 					throw VNCError.protocol(.zrleInvalidSubencoding(subencoding: subencoding))
 				}
 
-                tileX += tileSize
+                tileOffsetX += tileSize
 			}
 
-            tileY += tileSize
+            tileOffsetY += tileSize
 		}
         
         guard stream.offset == decompressedData.count else {

@@ -23,30 +23,36 @@ extension VNCProtocol.HextileEncoding {
 
 		let bytesPerPixel = framebuffer.sourceProperties.bytesPerPixel
 
-		let rectangleWidth = rectangle.width
-		let rectangleHeight = rectangle.height
+		// In Int: a tile's or a subrectangle's position added to the rectangle's in UInt16
+		// overflowed, and trapped, within a tile of 65535 -- and a framebuffer that wide is one a
+		// DesktopSize can set.
+		let rectangleWidth = Int(rectangle.width)
+		let rectangleHeight = Int(rectangle.height)
 
-		let rectangleX = rectangle.xPosition
-		let rectangleY = rectangle.yPosition
+		let tileSize = Int(Self.tileSize)
 
-		let xTileCount = (rectangleWidth + Self.tileSize - 1) / Self.tileSize
-		let yTileCount = (rectangleHeight + Self.tileSize - 1) / Self.tileSize
+		let xTileCount = (rectangleWidth + tileSize - 1) / tileSize
+		let yTileCount = (rectangleHeight + tileSize - 1) / tileSize
 
 		var lastBackgroundPixelData: Data?
 		var lastForegroundPixelData: Data?
 
 		for tileY in 0..<yTileCount {
 			for tileX in 0..<xTileCount {
-				let tileTopLeftX = rectangleX + (tileX * Self.tileSize)
-				let tileTopLeftY = rectangleY + (tileY * Self.tileSize)
+				// RFC 6143 7.7.4: 16x16 tiles, left to right and top to bottom, the last in a row
+				// and the tiles of the last row "correspondingly smaller".
+				let tileOffsetX = tileX * tileSize
+				let tileOffsetY = tileY * tileSize
 
-				let tileWidth = Self.tileSize(tileNumber: tileX,
-											  tileCount: xTileCount,
-											  rectangleSize: rectangleWidth)
-
-				let tileHeight = Self.tileSize(tileNumber: tileY,
-											   tileCount: yTileCount,
-											   rectangleSize: rectangleHeight)
+				guard let tileRegion = rectangle.subregion(x: tileOffsetX,
+														   y: tileOffsetY,
+														   width: min(tileSize, rectangleWidth - tileOffsetX),
+														   height: min(tileSize, rectangleHeight - tileOffsetY)) else {
+					// A tile lies inside its rectangle by construction; only a rectangle reaching
+					// past 65535, which FramebufferUpdate.receive never lets through, can get here.
+					// Refused rather than trapped all the same.
+					throw VNCError.protocol(.invalidData)
+				}
 
 				let subencodingMask = try await connection.readUInt8()
 				let subencoding = SubencodingMask(rawValue: subencodingMask)
@@ -57,10 +63,10 @@ extension VNCProtocol.HextileEncoding {
 					fatalError("Failed to convert Raw Encoding type to Int32")
 				}
 
-				let tileRectangle = VNCProtocol.Rectangle(xPosition: tileTopLeftX,
-														  yPosition: tileTopLeftY,
-														  width: tileWidth,
-														  height: tileHeight,
+				let tileRectangle = VNCProtocol.Rectangle(xPosition: tileRegion.x,
+														  yPosition: tileRegion.y,
+														  width: tileRegion.width,
+														  height: tileRegion.height,
 														  encodingType: rawEncodingType)
 
 				if isRaw {
@@ -101,19 +107,30 @@ extension VNCProtocol.HextileEncoding {
 							let coords = try await connection.readUInt8()
 							let dimensions = try await connection.readUInt8()
 
-							let subrectX = coords >> 4
-							let subrectY = coords & 0x0f
+							let subrectX = Int(coords >> 4)
+							let subrectY = Int(coords & 0x0f)
 
-							let subrectWidth = (dimensions >> 4) + 1
-							let subrectHeight = (dimensions & 0x0f) + 1
+							let subrectWidth = Int(dimensions >> 4) + 1
+							let subrectHeight = Int(dimensions & 0x0f) + 1
 
-							let subrectTopLeftX = tileTopLeftX + .init(subrectX)
-							let subrectTopLeftY = tileTopLeftY + .init(subrectY)
-
-							let subrectRegion = VNCRegion(x: subrectTopLeftX,
-														  y: subrectTopLeftY,
-														  width: .init(subrectWidth),
-														  height: .init(subrectHeight))
+							// 7.7.4: the rectangle is "split up into 16x16 tiles, allowing the
+							// dimensions of the subrectangles to be specified in 4 bits each" -- a
+							// subrectangle is a part of its tile, at a position within it
+							// (rfbproto.rst, Hextile Encoding, lines 3279-3288 and 3387-3392). One
+							// reaching past its tile -- past 16, or past a narrower last tile -- is
+							// refused, and the session ended, as an RRE sub-rectangle outside its
+							// rectangle is and for the same reasons (RREEncoding).
+							guard let subrectRegion = tileRectangle.subregion(x: subrectX,
+																			  y: subrectY,
+																			  width: subrectWidth,
+																			  height: subrectHeight) else {
+								throw VNCError.protocol(.subrectangleOutOfBounds(encodingType: encodingType,
+																				 subrectangle: .init(x: .init(subrectX),
+																									 y: .init(subrectY),
+																									 width: .init(subrectWidth),
+																									 height: .init(subrectHeight)),
+																				 bounds: tileRegion.size))
+							}
 
 							if var subrectPixelData {
 								framebuffer.fill(region: subrectRegion,
@@ -140,18 +157,5 @@ private extension VNCProtocol.HextileEncoding {
 		static let foregroundSpecified  = SubencodingMask(rawValue: 1 << 2)
 		static let anySubrects   		= SubencodingMask(rawValue: 1 << 3)
 		static let subrectsColoured   	= SubencodingMask(rawValue: 1 << 4)
-	}
-
-	static func tileSize(tileNumber: UInt16,
-						 tileCount: UInt16,
-						 rectangleSize: UInt16) -> UInt16 {
-		let overlap = rectangleSize % Self.tileSize
-
-		if tileNumber == tileCount - 1 &&
-		   overlap != 0 {
-			return overlap
-		}
-
-		return Self.tileSize
 	}
 }

@@ -151,6 +151,42 @@ struct ServerStream {
 	}
 }
 
+/// A zlib stream (RFC 1950) of stored deflate blocks (RFC 1951 3.2.4): nothing compressed, so a
+/// test can write exactly what a Zlib, ZRLE or Tight decoder inflates. RFC 6143 7.7.6 has one
+/// stream for a whole connection, so this is one per stream the kit keeps: the two-byte header
+/// goes before the first chunk only, and no block is final, so the stream -- like a server's --
+/// never ends.
+struct ZlibStoredStream {
+	private var started = false
+
+	init() { }
+
+	mutating func chunk(_ bytes: [UInt8]) -> [UInt8] {
+		var out = [UInt8]()
+
+		if !started {
+			out += [0x78, 0x01] // deflate, 32 KiB window, no dictionary; 0x7801 % 31 == 0
+			started = true
+		}
+
+		var offset = 0
+
+		repeat {
+			let count = min(65535, bytes.count - offset)
+			let complement = ~UInt16(count)
+
+			out.append(0x00) // BFINAL 0, BTYPE 00: stored
+			out += [UInt8(count & 0xff), UInt8(count >> 8)]
+			out += [UInt8(complement & 0xff), UInt8(complement >> 8)]
+			out += bytes[offset..<offset + count]
+
+			offset += count
+		} while offset < bytes.count
+
+		return out
+	}
+}
+
 /// A framebuffer as the kit makes one for a session at `depth`, in plain memory rather than an
 /// IOSurface so the same code runs everywhere.
 func makeTestFramebuffer(width: UInt16,

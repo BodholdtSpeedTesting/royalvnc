@@ -54,7 +54,16 @@ extension VNCProtocol.ServerCutText {
 						 text: text,
 						 extended: nil)
 		} else { // Extended Message
-			let extendedLength = Int32(abs(length))
+			// rfbproto.rst, Extended Clipboard Pseudo-Encoding (lines 4780-4805): a negative
+			// length selects the extended form, and "abs(length) is the total number of following
+			// bytes". Worked out in Int: `Int32(abs(length))` trapped for 0x80000000, whose absolute
+			// value is one past Int32.max. Capped as the standard form's text is, which refuses
+			// that one too, and ends the session.
+			let extendedLength = -length
+
+			guard extendedLength <= Self.maximumTextLength else {
+				throw VNCError.protocol(.invalidData)
+			}
 
 			let extended = try await ExtendedServerCutText.receive(connection: connection,
 																   logger: logger,
@@ -159,10 +168,24 @@ extension VNCProtocol.ServerCutText {
 		}
 
 		// See https://github.com/novnc/noVNC/blob/master/core/rfb.js#L2136
+		//
+		// `length` is the message's, after its length field: the flags, and whatever follows them.
+		// The kit reads the flags and, for caps, the sizes; everything after that -- a provide's
+		// data, which it does not read, or the size of a format bit 15 announces (rfbproto.rst,
+		// lines 4866-4867, counts format bits 0 to 15; this reads 0 to 14) -- is read past, so
+		// that the stream stays in step. It used to be left where it was, to be read as the next
+		// message.
 		static func receive(connection: NetworkConnectionReading,
 							logger: VNCLogger,
-							length: Int32) async throws -> Self {
+							length: Int) async throws -> Self {
+			// Too short for its own flags: a server breaking the protocol.
+			guard length >= MemoryLayout<UInt32>.size else {
+				throw VNCError.protocol(.invalidData)
+			}
+
 			let flagsRawValue = try await connection.readUInt32()
+
+			var consumed = MemoryLayout<UInt32>.size
 
 			let formats: Format = .init(rawValue: flagsRawValue)
 			let actions: Action = .init(rawValue: flagsRawValue)
@@ -210,7 +233,14 @@ extension VNCProtocol.ServerCutText {
 				serverCapabilities = .init(format: serverFormatCapabilities,
 										   action: serverActionCapabilities)
 
+				// Sizes past the message's own length: a server breaking the protocol.
+				guard consumed + bytesToSkip <= length else {
+					throw VNCError.protocol(.invalidData)
+				}
+
 				try await connection.readPadding(length: bytesToSkip)
+
+				consumed += bytesToSkip
 
 				// Caps handling done, send caps with the clients capabilities set as a response
 				// TODO:
@@ -242,6 +272,10 @@ extension VNCProtocol.ServerCutText {
 			} else {
 				// TODO:
 				throw VNCError.protocol(.unexpectedExtendedServerCutTextAction(action: actions.rawValue))
+			}
+
+			if consumed < length {
+				try await connection.readPadding(length: length - consumed)
 			}
 
 			return .init(serverCapabilities: serverCapabilities)

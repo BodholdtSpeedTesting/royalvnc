@@ -539,7 +539,9 @@ public final class VNCConnection: NSObjectOrAnyObject {
             VNCFrameEncodingType.zlib.rawValue: VNCProtocol.ZlibEncoding(zStream: sharedZStream),
 			VNCFrameEncodingType.zrle.rawValue: VNCProtocol.ZRLEEncoding(zStream: sharedZRLEZStream),
 			VNCFrameEncodingType.hextile.rawValue: hextileEncoding,
-			VNCFrameEncodingType.coRRE.rawValue: VNCProtocol.RREEncoding(),
+			// CoRRE's own decoder: its sub-rectangles' positions and sizes are U8s (rfbproto.rst,
+			// CoRRE Encoding, lines 3241-3274), where RRE's are U16s.
+			VNCFrameEncodingType.coRRE.rawValue: VNCProtocol.CoRREEncoding(),
 			VNCFrameEncodingType.rre.rawValue: VNCProtocol.RREEncoding(),
 			VNCFrameEncodingType.raw.rawValue: rawEncoding,
 

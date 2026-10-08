@@ -138,6 +138,34 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertEqual(session.pixel(295, 1), 0, "drawn outside the rectangle")
 	}
 
+	/// Encoding 4 through the table a connection decodes with. CoRRE's sub-rectangles are four
+	/// bytes after their pixel, RRE's eight; read as RRE, as they were at 2ad33e2, two CoRRE
+	/// sub-rectangles became one RRE sub-rectangle and the rest of the stream was read out of step.
+	func testCoRRERectangleIsReadWithOneBytePositions() async throws {
+		let session = try TestSession(width: 32, height: 32, depth: 24)
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 2)
+		stream.rectangle(x: 4, y: 4, width: 8, height: 8, encoding: 4)
+		stream.u32(2)
+		stream.pixel(0x11_22_33, bytesPerPixel: 4)
+		stream.pixel(0xaa_bb_cc, bytesPerPixel: 4)
+		stream.u8(1); stream.u8(2); stream.u8(3); stream.u8(1)
+		stream.pixel(0x44_55_66, bytesPerPixel: 4)
+		stream.u8(7); stream.u8(7); stream.u8(1); stream.u8(1)
+		// And a rectangle after it, which a reader out of step would not find.
+		stream.rectangle(x: 0, y: 0, width: 1, height: 1, encoding: 0)
+		stream.pixel(0x77_88_99, bytesPerPixel: 4)
+
+		try await session.receiveFramebufferUpdate(stream)
+
+		XCTAssertEqual(session.pixel(5, 6), 0xaa_bb_cc)
+		XCTAssertEqual(session.pixel(7, 6), 0xaa_bb_cc)
+		XCTAssertEqual(session.pixel(8, 6), 0x11_22_33)
+		XCTAssertEqual(session.pixel(11, 11), 0x44_55_66)
+		XCTAssertEqual(session.pixel(0, 0), 0x77_88_99)
+	}
+
 	// MARK: - SetColourMapEntries: entries inside the colour map (RFC 6143 7.6.2)
 
 	/// A server mapping the pixel values of the kit's 8-bit depth, the one format of its that uses

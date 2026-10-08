@@ -392,14 +392,14 @@ final class MacKeyCharactersWithoutDeadKeysTests: XCTestCase {
 	}
 }
 
-/// What each key sent going down, by its key code: HeldKeyCodes.
+/// What each key sent going down, by its key code, and under which Shift: HeldKeyCodes.
 final class HeldKeyCodesTests: XCTestCase {
 	private let lowerA = [ VNCKeyCode(0x61) ], upperA = [ VNCKeyCode(0x41) ]
 
 	func testAKeyComesUpAsItWentDownAndIsForgotten() {
 		var held = HeldKeyCodes()
 
-		let down = held.keyDown(Key.a, isARepeat: false) { self.upperA }
+		let down = held.keyDown(Key.a, isARepeat: false, shift: false) { self.upperA }
 
 		XCTAssertEqual(down.released, [ ])
 		XCTAssertEqual(down.pressed, upperA)
@@ -411,9 +411,9 @@ final class HeldKeyCodesTests: XCTestCase {
 	func testARepeatThatSendsWhatThePressSentResendsIt() {
 		var held = HeldKeyCodes()
 
-		_ = held.keyDown(Key.a, isARepeat: false) { self.lowerA }
+		_ = held.keyDown(Key.a, isARepeat: false, shift: false) { self.lowerA }
 
-		let repeated = held.keyDown(Key.a, isARepeat: true) { self.lowerA }
+		let repeated = held.keyDown(Key.a, isARepeat: true, shift: false) { self.lowerA }
 
 		XCTAssertEqual(repeated.released, [ ])
 		XCTAssertEqual(repeated.pressed, lowerA)
@@ -422,27 +422,76 @@ final class HeldKeyCodesTests: XCTestCase {
 	}
 
 	func testARepeatThatSendsOtherKeysLetsGoOfThePressAndPressesThem() {
+		// 'a' held, Shift pressed mid-repeat: 'A'.
 		var held = HeldKeyCodes()
 
-		_ = held.keyDown(Key.a, isARepeat: false) { self.lowerA }
+		_ = held.keyDown(Key.a, isARepeat: false, shift: false) { self.lowerA }
 
-		let repeated = held.keyDown(Key.a, isARepeat: true) { self.upperA }
+		let repeated = held.keyDown(Key.a, isARepeat: true, shift: true) { self.upperA }
 
 		XCTAssertEqual(repeated.released, lowerA, "what the press sent, which the server holds")
 		XCTAssertEqual(repeated.pressed, upperA, "what the key types now")
 
-		let again = held.keyDown(Key.a, isARepeat: true) { self.upperA }
+		let again = held.keyDown(Key.a, isARepeat: true, shift: true) { self.upperA }
 
-		XCTAssertEqual(again.released, [ ], "the next repeat, unchanged since, re-sends it")
+		XCTAssertEqual(again.released, [ ], "the next repeat, unchanged since -- its keys and its Shift -- re-sends it")
 		XCTAssertEqual(again.pressed, upperA)
 		XCTAssertEqual(held.keyUp(Key.a) { self.lowerA }, upperA, "the key-up lets go of what the last repeat sent")
 		XCTAssertTrue(held.isEmpty)
 	}
 
+	func testARepeatOfTheSameKeysUnderAnotherShiftLetsGoOfThemAndPressesThemAgain() {
+		// Caps Lock on, 'A' held with Shift, Shift let go mid-repeat: the key types 'A' still. A server presses a held key
+		// again at a repeat under the Shift it holds then, which no longer makes the capital; pressed anew, it is decided by
+		// its keysym.
+		var held = HeldKeyCodes()
+
+		_ = held.keyDown(Key.a, isARepeat: false, shift: true) { self.upperA }
+
+		let same = held.keyDown(Key.a, isARepeat: true, shift: true) { self.upperA }
+
+		XCTAssertEqual(same.released, [ ], "the keys and the Shift they went down under: re-sent")
+		XCTAssertEqual(same.pressed, upperA)
+
+		let shiftLetGo = held.keyDown(Key.a, isARepeat: true, shift: false) { self.upperA }
+
+		XCTAssertEqual(shiftLetGo.released, upperA, "the same keys under another Shift: let go of")
+		XCTAssertEqual(shiftLetGo.pressed, upperA, "and pressed again")
+
+		let again = held.keyDown(Key.a, isARepeat: true, shift: false) { self.upperA }
+
+		XCTAssertEqual(again.released, [ ], "the next repeat, under the Shift remembered now: re-sent")
+		XCTAssertEqual(again.pressed, upperA)
+
+		let shiftPressed = held.keyDown(Key.a, isARepeat: true, shift: true) { self.upperA }
+
+		XCTAssertEqual(shiftPressed.released, upperA, "Shift pressed again: let go of and pressed again")
+		XCTAssertEqual(shiftPressed.pressed, upperA)
+		XCTAssertEqual(held.keyUp(Key.a) { self.lowerA }, upperA)
+		XCTAssertTrue(held.isEmpty)
+	}
+
+	func testANewPressIsRememberedWithItsOwnShift() {
+		// A press of a key still held (its key-up never came) is remembered under its own Shift, not the old press's.
+		var held = HeldKeyCodes()
+
+		_ = held.keyDown(Key.a, isARepeat: false, shift: false) { self.upperA }
+
+		let pressedAgain = held.keyDown(Key.a, isARepeat: false, shift: true) { self.upperA }
+
+		XCTAssertEqual(pressedAgain.released, upperA, "its key-up never came: let go of first, as ever")
+		XCTAssertEqual(pressedAgain.pressed, upperA)
+
+		let repeated = held.keyDown(Key.a, isARepeat: true, shift: true) { self.upperA }
+
+		XCTAssertEqual(repeated.released, [ ], "a repeat under the new press's Shift: re-sent")
+		XCTAssertEqual(repeated.pressed, upperA)
+	}
+
 	func testARepeatOfAKeyNeverSeenGoingDownIsAPress() {
 		var held = HeldKeyCodes()
 
-		let repeated = held.keyDown(Key.a, isARepeat: true) { self.upperA }
+		let repeated = held.keyDown(Key.a, isARepeat: true, shift: false) { self.upperA }
 
 		XCTAssertEqual(repeated.released, [ ])
 		XCTAssertEqual(repeated.pressed, upperA)
@@ -452,9 +501,9 @@ final class HeldKeyCodesTests: XCTestCase {
 	func testAPressOfAKeyStillHeldLetsGoOfThatPressFirst() {
 		var held = HeldKeyCodes()
 
-		_ = held.keyDown(Key.a, isARepeat: false) { self.upperA }
+		_ = held.keyDown(Key.a, isARepeat: false, shift: false) { self.upperA }
 
-		let again = held.keyDown(Key.a, isARepeat: false) { self.lowerA }
+		let again = held.keyDown(Key.a, isARepeat: false, shift: false) { self.lowerA }
 
 		XCTAssertEqual(again.released, upperA, "its key-up never came: the server still holds it")
 		XCTAssertEqual(again.pressed, lowerA)
@@ -465,15 +514,15 @@ final class HeldKeyCodesTests: XCTestCase {
 	func testAKeyThatSentNothingComesUpAsNothing() {
 		var held = HeldKeyCodes()
 
-		XCTAssertEqual(held.keyDown(Key.a, isARepeat: false) { [ ] }.pressed, [ ])
+		XCTAssertEqual(held.keyDown(Key.a, isARepeat: false, shift: false) { [ ] }.pressed, [ ])
 		XCTAssertEqual(held.keyUp(Key.a) { self.lowerA }, [ ], "not a key-up for something never pressed")
 	}
 
 	func testKeysAreRememberedApart() {
 		var held = HeldKeyCodes()
 
-		_ = held.keyDown(Key.a, isARepeat: false) { self.upperA }
-		_ = held.keyDown(Key.e, isARepeat: false) { [ VNCKeyCode(0x65) ] }
+		_ = held.keyDown(Key.a, isARepeat: false, shift: false) { self.upperA }
+		_ = held.keyDown(Key.e, isARepeat: false, shift: false) { [ VNCKeyCode(0x65) ] }
 
 		XCTAssertEqual(held.keyUp(Key.a) { [ ] }, upperA)
 		XCTAssertEqual(held.keyUp(Key.e) { [ ] }, [ VNCKeyCode(0x65) ])
@@ -839,6 +888,51 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		flags(Key.capsLock, [ ])
 
 		XCTAssertEqual(sent(), [ "down 0x61", "up 0x61", "down 0x41", "up 0x41" ])
+	}
+
+	func testCapsLockOnAndShiftLetGoMidRepeatPressesTheCapitalAgain() {
+		// Caps Lock on, Shift and A held, Shift let go mid-repeat: the Mac goes on typing A. The repeat's keysym is the same
+		// and its Shift is not, so 'A' is let go of and pressed again: a new press, which a server decides by its keysym,
+		// where its held key pressed again with no Shift would type a.
+		flags(Key.capsLock, .capsLock)
+		flags(Key.shift, [ .capsLock, .shift, .leftShift ])
+		down(Key.a, "A", ignoring: "A", flags: [ .capsLock, .shift, .leftShift ])
+		down(Key.a, "A", ignoring: "A", flags: [ .capsLock, .shift, .leftShift ], repeat: true)
+		flags(Key.shift, .capsLock)
+		down(Key.a, "A", ignoring: "a", flags: .capsLock, repeat: true)
+		down(Key.a, "A", ignoring: "a", flags: .capsLock, repeat: true)
+		up(Key.a, "A", ignoring: "a", flags: .capsLock)
+		flags(Key.capsLock, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe1", "down 0x41", "down 0x41", "up 0xffe1", "up 0x41", "down 0x41", "down 0x41",
+								 "up 0x41" ])
+	}
+
+	func testCapsLockOnAndShiftPressedMidRepeatPressesTheCapitalAgain() {
+		// Caps Lock on, A held, Shift pressed mid-repeat: Caps Lock and Shift type A on a Mac. A server whose own Caps Lock is
+		// on would type its held key pressed again under Shift as a.
+		flags(Key.capsLock, .capsLock)
+		down(Key.a, "A", ignoring: "a", flags: .capsLock)
+		down(Key.a, "A", ignoring: "a", flags: .capsLock, repeat: true)
+		flags(Key.shift, [ .capsLock, .shift, .leftShift ])
+		down(Key.a, "A", ignoring: "A", flags: [ .capsLock, .shift, .leftShift ], repeat: true)
+		up(Key.a, "A", ignoring: "A", flags: [ .capsLock, .shift, .leftShift ])
+		flags(Key.shift, .capsLock)
+		flags(Key.capsLock, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0x41", "down 0x41", "down 0xffe1", "up 0x41", "down 0x41", "up 0x41", "up 0xffe1" ])
+	}
+
+	func testCapsLockTurnedOnMidRepeatOfAKeyItLeavesAloneReSendsIt() {
+		// '1' held while Caps Lock goes on: the key types '1' still, and a server never sees Caps Lock -- re-sent, not let go
+		// of and pressed again.
+		down(Key.one, "1", ignoring: "1")
+		flags(Key.capsLock, .capsLock)
+		down(Key.one, "1", ignoring: "1", flags: .capsLock, repeat: true)
+		up(Key.one, "1", ignoring: "1", flags: .capsLock)
+		flags(Key.capsLock, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0x31", "down 0x31", "up 0x31" ])
 	}
 
 	func testARepeatOfTheKeyAfterADeadKeyIsNotItsOwn() {

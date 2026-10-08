@@ -104,8 +104,8 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
     @objc
 	public var lastModifierFlags: NSEvent.ModifierFlags = [ ]
 
-	/// What each held key sent going down (its press, or a repeat that changed it), so that its
-	/// key-up sends the same.
+	/// What each held key sent going down (its press, or a repeat that changed it), and under which
+	/// Shift, so that its key-up sends the same.
 	private var heldKeyCodes = HeldKeyCodes()
 
 	/// Whether the last key to go down, modifiers aside, was a dead key, so that the key after it
@@ -508,9 +508,10 @@ extension VNCCAFramebufferView {
 	}
 
 	/// A key goes down as what it types now (`keyCodesFrom(event:)`), and is remembered by its
-	/// key code; an auto-repeat sends what the key types now too, letting go of what its press
-	/// sent where that has changed (HeldKeyCodes). A repeat is no new key: it is worked out
-	/// without the view's dead-key bookkeeping, which it leaves as it is.
+	/// key code with the event's Shift; an auto-repeat sends what the key types now too, letting go
+	/// of what its press sent first where that, or the Shift it went down under, has changed
+	/// (HeldKeyCodes). A repeat is no new key: it is worked out without the view's dead-key
+	/// bookkeeping, which it leaves as it is.
 	func handleKeyDown(with event: NSEvent?) {
 		guard let event,
               let connection else {
@@ -518,7 +519,8 @@ extension VNCCAFramebufferView {
 		}
 
 		let keys = heldKeyCodes.keyDown(event.keyCode,
-										isARepeat: event.isARepeat) {
+										isARepeat: event.isARepeat,
+										shift: event.modifierFlags.contains(.shift)) {
 			event.isARepeat
 				? VNCKeyCode.keyCodesFrom(event: event,
 										  charactersWithoutDeadKeys: charactersWithoutDeadKeys(event))

@@ -40,6 +40,10 @@ public extension VNCError {
 		/// `VNCFramebuffer.maximumPixelCount` pixels.
 		case framebufferTooLarge(width: UInt16, height: UInt16)
 
+		/// Diffie-Hellman parameters (security type 30, Apple Remote Desktop) that cannot be a
+		/// real group: `reason` says which.
+		case diffieHellmanGroupRefused(reason: String)
+
 		// MARK: - LocalizedError
 		public var errorDescription: String? {
 			// TODO: Localize
@@ -98,6 +102,8 @@ public extension VNCError {
 					return "Colour map \(entries) were retrieved, beyond the \(colourMapSize) entries of the colour map."
 				case .framebufferTooLarge(let width, let height):
 					return "A framebuffer size of \(width)x\(height) was retrieved, \(Int(width) * Int(height)) pixels, more than the \(VNCFramebuffer.maximumPixelCount) this client will allocate."
+				case .diffieHellmanGroupRefused(let reason):
+					return "Diffie-Hellman parameters were retrieved that cannot be a real group: \(reason)."
 			}
 		}
 	}

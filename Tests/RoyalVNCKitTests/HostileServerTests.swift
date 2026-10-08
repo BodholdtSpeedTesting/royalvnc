@@ -651,6 +651,150 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertEqual(width, 64)
 		XCTAssertEqual(height, 48)
 	}
+
+	// MARK: - Apple Remote Desktop: a Diffie-Hellman group that can be real (rfbproto.rst 1336-1374)
+
+	/// RFC 2409 6.2's Second Oakley Group, 1,024 bits, generator 2: a real group, and the size
+	/// noVNC's test of this security type uses.
+	static let oakleyGroup2Prime: [UInt8] = hexBytes("""
+		FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+		29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+		EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+		E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
+		EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE65381
+		FFFFFFFF FFFFFFFF
+		""")
+
+	/// The parameters as the server sends them: generator, key-size, prime-modulus, public-value.
+	private func receiveARD(generator: UInt16, keySize: UInt16, prime: [UInt8], publicValue: [UInt8]) async throws {
+		var stream = ServerStream()
+		stream.u16(generator)
+		stream.u16(keySize)
+		stream.append(prime)
+		stream.append(publicValue)
+
+		let reader = ScriptedReader(stream.bytes)
+
+		_ = try await VNCProtocol.ARDAuthentication.receive(connection: reader)
+
+		XCTAssertEqual(reader.remaining, 0, "the parameters were not read to their end")
+	}
+
+	/// `value` as the last byte of a `size`-byte number.
+	private func small(_ value: UInt8, size: Int) -> [UInt8] {
+		[UInt8](repeating: 0, count: size - 1) + [value]
+	}
+
+	func testARDRealGroupIsAccepted() async throws {
+		let prime = Self.oakleyGroup2Prime
+		var publicValue = prime
+		publicValue[0] = 0x12
+
+		XCTAssertEqual(prime.count, 128)
+
+		try await receiveARD(generator: 2, keySize: 128, prime: prime, publicValue: publicValue)
+
+		// The interval's ends: 2 and the prime less two.
+		var primeLessTwo = prime
+		primeLessTwo[127] -= 2
+
+		try await receiveARD(generator: 2, keySize: 128, prime: prime, publicValue: small(2, size: 128))
+		try await receiveARD(generator: 2, keySize: 128, prime: prime, publicValue: primeLessTwo)
+	}
+
+	/// A prime of one made the private key's `repeat ... while isZero` loop spin for ever -- a
+	/// random number below one is always zero -- and a prime of zero trapped in CryptoSwift's
+	/// `randomInteger(lessThan:)`. Both are refused as the parameters are read: before the user is
+	/// asked for a password, and before any key is made. A prime of three leaves no generator.
+	func testARDDegeneratePrimeIsRefused() async throws {
+		for (last, expected) in [(UInt8(1), "of one"), (0, "even"), (4, "even"), (3, "generator")] {
+			do {
+				try await receiveARD(generator: 2, keySize: 128, prime: small(last, size: 128), publicValue: small(2, size: 128))
+
+				XCTFail("a prime modulus of \(last) was accepted")
+			} catch {
+				assertServerRefused(error, naming: "diffieHellmanGroupRefused")
+				XCTAssertTrue("\(error)".contains(expected), "\(error)")
+			}
+		}
+	}
+
+	func testARDKeySizeOutsideAnyRealGroupIsRefused() async throws {
+		for keySize in [0, 1, 8, 63, 1025, 65535] {
+			let number = [UInt8](repeating: 0xff, count: keySize)
+
+			do {
+				try await receiveARD(generator: 2, keySize: UInt16(keySize), prime: number, publicValue: number)
+
+				XCTFail("a key size of \(keySize) bytes was accepted")
+			} catch {
+				assertServerRefused(error, naming: "diffieHellmanGroupRefused")
+				XCTAssertTrue("\(error)".contains("key size"), "\(error)")
+			}
+		}
+
+		// The window's own ends.
+		for keySize in [64, 1024] {
+			try await receiveARD(generator: 2,
+								 keySize: UInt16(keySize),
+								 prime: [UInt8](repeating: 0xff, count: keySize),
+								 publicValue: small(2, size: keySize))
+		}
+	}
+
+	/// RFC 2631 2.1.5 checks a public value against [2, p-1]; p - 1, whose square is 1, is excluded
+	/// too. The generator, the same.
+	func testARDGeneratorOrPublicValueOutsideTheGroupIsRefused() async throws {
+		let prime = Self.oakleyGroup2Prime
+		var primeLessOne = prime
+		primeLessOne[127] -= 1
+
+		let cases: [(UInt16, [UInt8], String)] = [
+			(0, small(2, size: 128), "generator"),
+			(1, small(2, size: 128), "generator"),
+			(2, small(0, size: 128), "public value"),
+			(2, small(1, size: 128), "public value"),
+			(2, primeLessOne, "public value"),
+			(2, prime, "public value"),
+			(2, [UInt8](repeating: 0xff, count: 128), "public value")
+		]
+
+		for (generator, publicValue, expected) in cases {
+			do {
+				try await receiveARD(generator: generator, keySize: 128, prime: prime, publicValue: publicValue)
+
+				XCTFail("generator \(generator) and that public value were accepted")
+			} catch {
+				assertServerRefused(error, naming: "diffieHellmanGroupRefused")
+				XCTAssertTrue("\(error)".contains(expected), "\(error)")
+			}
+		}
+
+		// A generator of p - 1, where the prime is small enough for p - 1 to fit the generator's
+		// two bytes: 65,535 padded to 64 bytes. Its p - 1, 65,534, is refused, and its p - 2 is
+		// the interval's end.
+		let narrowPrime = [UInt8](repeating: 0, count: 62) + [0xff, 0xff]
+
+		do {
+			try await receiveARD(generator: 0xfffe, keySize: 64, prime: narrowPrime, publicValue: small(2, size: 64))
+
+			XCTFail("a generator of the prime less one was accepted")
+		} catch {
+			assertServerRefused(error, naming: "diffieHellmanGroupRefused")
+			XCTAssertTrue("\(error)".contains("generator"), "\(error)")
+		}
+
+		try await receiveARD(generator: 0xfffd, keySize: 64, prime: narrowPrime, publicValue: small(2, size: 64))
+	}
+}
+
+/// "FFFF 0001 ..." as bytes.
+func hexBytes(_ text: String) -> [UInt8] {
+	let digits = Array(text.filter(\.isHexDigit))
+
+	return stride(from: 0, to: digits.count - 1, by: 2).map {
+		UInt8(String(digits[$0...$0 + 1]), radix: 16)!
+	}
 }
 
 // MARK: - A session's worth of decoding, without a connection

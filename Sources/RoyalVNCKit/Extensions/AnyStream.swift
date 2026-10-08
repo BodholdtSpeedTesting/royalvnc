@@ -17,11 +17,9 @@ extension AnyStream {
 		let length = MemoryLayout<UInt8>.size
 		let data = try read(length: length)
 
-		#if DEBUG
 		guard data.count == length else {
 			throw VNCError.protocol(.invalidData)
 		}
-		#endif
 
 		let value = data[0]
 
@@ -32,11 +30,9 @@ extension AnyStream {
 		let length = MemoryLayout<UInt16>.size
 		let data = try read(length: length)
 
-		#if DEBUG
 		guard data.count == length else {
 			throw VNCError.protocol(.invalidData)
 		}
-		#endif
 
 		let bigEndianValue = data.withUnsafeBytes {
 			$0.loadUnaligned(as: UInt16.self)
@@ -53,11 +49,9 @@ extension AnyStream {
 		let length = MemoryLayout<UInt32>.size
 		let data = try read(length: length)
 
-		#if DEBUG
 		guard data.count == length else {
 			throw VNCError.protocol(.invalidData)
 		}
-		#endif
 
 		let bigEndianValue = data.withUnsafeBytes {
 			$0.loadUnaligned(as: UInt32.self)

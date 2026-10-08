@@ -540,6 +540,15 @@ private extension VNCFramebuffer {
 		let sourceColumnLength = regionWidth * sourceBytesPerPixel
 		let destinationColumnLength = regionWidth * destinationBytesPerPixel
 
+		// The rows below are copied out of `data` with no check of its length, so it must hold the
+		// region's pixels, as every decoder's does: one that holds fewer is the kit's mistake, not
+		// something a server sent, and the update is dropped rather than read past.
+		guard data.count >= regionHeight * sourceColumnLength else {
+			logger.logError("Update of \(data.count) bytes for a region of \(regionHeight * sourceColumnLength); nothing drawn")
+
+			return
+		}
+
         let targetBase = surfaceAddress
 
 		data.withUnsafeBytes { sourcePixelDataPtr in
@@ -614,11 +623,17 @@ private extension VNCFramebuffer {
 		let sourceBytesPerPixel = sourceProperties.bytesPerPixel
 		let destinationBytesPerPixel = destinationProperties.bytesPerPixel
 
-#if DEBUG
+		// One PIXEL is bytesPerPixel bytes (RFC 6143 7), and the copy below reads that many --
+		// pixelData[0...2] when no conversion is needed, a 16- or 32-bit load when it is -- with no
+		// check of its own. This guard was compiled into debug builds only, so a release build
+		// handed a shorter pixel trapped or read past it. Every decoder reads exactly one PIXEL, so
+		// a pixel of another length is the kit's mistake, not something a server sent: the fill
+		// is dropped, as debug builds always dropped it, and the session goes on.
         guard pixelData.count == sourceBytesPerPixel else {
+            logger.logError("Fill pixel of \(pixelData.count) bytes for \(sourceBytesPerPixel)-byte pixels; nothing drawn")
+
             return
         }
-#endif
 
         let fixedAlpha = UInt8(destinationProperties.alphaMax)
 

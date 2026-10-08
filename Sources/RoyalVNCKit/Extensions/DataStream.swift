@@ -21,11 +21,15 @@ extension DataStream: AnyStream {
 		let currentOffset = self.offset
 		let newOffset = currentOffset + length
 
-		#if DEBUG
-		guard newOffset <= dataLength else {
+		// The data is what a server's zlib stream inflated to -- ZRLE's tiles -- so its length is the
+		// server's to choose. This check was compiled into debug builds only: a release build
+		// asked for bytes past the end trapped in `subdata(in:)`. A stream that ends before its
+		// tiles do is a server breaking the protocol, and ends the session with the error, as it
+		// always did in a debug build.
+		guard length >= 0,
+			  newOffset <= dataLength else {
 			throw VNCError.protocol(.noData)
 		}
-		#endif
 
 		let subData = data.subdata(in: currentOffset..<newOffset)
 

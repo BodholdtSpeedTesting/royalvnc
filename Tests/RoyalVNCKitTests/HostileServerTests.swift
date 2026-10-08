@@ -453,6 +453,63 @@ final class HostileServerTests: XCTestCase {
 
 		XCTAssertEqual((0..<5).map { session.pixel($0, 0) }, [0x11_11_11, 0x22_22_22, 0x33_33_33, 0x33_33_33, 0])
 	}
+
+	// MARK: - Length checks a release build keeps
+
+	/// ZRLE's tiles are read from what the server's zlib data inflated to, a length the server
+	/// chooses. Here a raw 4x1 tile with 3 bytes of its 12: a debug build refused it, a release
+	/// build asked Data for bytes past its end and trapped. Run in both (`swift test` and
+	/// `swift test -c release`).
+	func testZRLETileDataEndingEarlyIsRefused() async throws {
+		let session = try TestSession(width: 8, height: 1, depth: 24)
+
+		do {
+			try await session.receiveZRLE(width: 4, height: 1, tiles: [0, 0x11, 0x22, 0x33])
+
+			XCTFail("a raw tile of 3 bytes for 4 pixels was accepted")
+		} catch {
+			assertServerRefused(error, naming: "noData")
+		}
+	}
+
+	/// No decoder hands `fill` a pixel of another length -- each reads one PIXEL -- so this is the
+	/// kit's own mistake, and the fill is dropped, as a debug build always dropped it. A release
+	/// build read the pixel's first three bytes, or a 16-bit load, past its end.
+	func testFillWithAPixelOfTheWrongLengthDrawsNothing() throws {
+		for (depth, pixel) in [(UInt8(24), Data([1, 2])), (24, Data([1, 2, 3, 4, 5])), (16, Data([1])), (8, Data())] {
+			let logger = QuietLogger()
+			let framebuffer = try makeTestFramebuffer(width: 4, height: 4, depth: depth, logger: logger)
+			var pixel = pixel
+
+			framebuffer.fill(region: .init(x: 0, y: 0, width: 2, height: 2), withPixel: &pixel)
+
+			let bytes = framebuffer.surfaceAddress.assumingMemoryBound(to: UInt8.self)
+
+			XCTAssertTrue((0..<64).allSatisfy { bytes[$0] == 0 }, "a \(pixel.count)-byte pixel was drawn at depth \(depth)")
+			XCTAssertEqual(logger.errorCount, 1)
+		}
+	}
+
+	/// The same for `update`, whose rows are copied out of the data with no check of their own.
+	func testUpdateWithFewerBytesThanItsRegionDrawsNothing() throws {
+		let logger = QuietLogger()
+		let framebuffer = try makeTestFramebuffer(width: 4, height: 4, depth: 24, logger: logger)
+
+		var short = Data(repeating: 0xff, count: 15)
+		framebuffer.update(region: .init(x: 0, y: 0, width: 2, height: 2), data: &short)
+
+		let bytes = framebuffer.surfaceAddress.assumingMemoryBound(to: UInt8.self)
+
+		XCTAssertTrue((0..<64).allSatisfy { bytes[$0] == 0 }, "15 bytes were drawn as a 2x2 region")
+		XCTAssertEqual(logger.errorCount, 1)
+
+		var enough = Data(repeating: 0xff, count: 16)
+		framebuffer.update(region: .init(x: 0, y: 0, width: 2, height: 2), data: &enough)
+
+		XCTAssertEqual(bytes[0], 0xff)
+		XCTAssertEqual(bytes[4 * 4 + 4 + 2], 0xff)
+		XCTAssertEqual(logger.errorCount, 1)
+	}
 }
 
 // MARK: - A session's worth of decoding, without a connection

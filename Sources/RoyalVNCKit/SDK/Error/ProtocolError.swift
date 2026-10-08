@@ -27,6 +27,11 @@ public extension VNCError {
 		case zrleUnexpectedRLEStreamEnd
 		case unexpectedExtendedServerCutTextAction(action: UInt32)
 
+		/// An RRE or CoRRE sub-rectangle, or a Hextile subrectangle, that does not lie inside the
+		/// rectangle or tile it belongs to: `subrectangle` as the server gave it, relative to that
+		/// area, and `bounds` the area's size.
+		case subrectangleOutOfBounds(encodingType: VNCEncodingType, subrectangle: VNCRegion, bounds: VNCSize)
+
 		// MARK: - LocalizedError
 		public var errorDescription: String? {
 			// TODO: Localize
@@ -73,6 +78,10 @@ public extension VNCError {
 					return "End of stream reached while reading ZRLE RLE run-length."
 				case .unexpectedExtendedServerCutTextAction(let action):
 					return "An unexpected ExtendedServerCutText Action (\(action)) was retrieved."
+				case .subrectangleOutOfBounds(let encodingType, let subrectangle, let bounds):
+					let encodingName = VNCFrameEncodingType(rawValue: encodingType)?.description ?? "\(encodingType.rawValue)"
+
+					return "A sub-rectangle of \(subrectangle.width)x\(subrectangle.height) at \(subrectangle.x),\(subrectangle.y) was retrieved in \(encodingName) data that does not lie inside the \(bounds.width)x\(bounds.height) area it belongs to."
 			}
 		}
 	}

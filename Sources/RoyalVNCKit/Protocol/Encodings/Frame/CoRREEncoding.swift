@@ -33,10 +33,21 @@ extension VNCProtocol.CoRREEncoding {
 			let subRectangle = try await SubRectangle.receive(bytesPerPixel: bytesPerPixel,
 															  connection: connection)
 
-			let subRegion = VNCRegion(x: rectangle.xPosition + .init(subRectangle.xPosition),
-									  y: rectangle.yPosition + .init(subRectangle.yPosition),
-									  width: .init(subRectangle.width),
-									  height: .init(subRectangle.height))
+			// rfbproto.rst, CoRRE Encoding (lines 3241-3274): RRE with each sub-rectangle's
+			// position and size in a U8. Refused outside its rectangle for RRE's reasons; see
+			// RREEncoding. The position used to be a UInt16 sum, which a rectangle within 255
+			// pixels of 65535 overflowed.
+			guard let subRegion = rectangle.subregion(x: Int(subRectangle.xPosition),
+													  y: Int(subRectangle.yPosition),
+													  width: Int(subRectangle.width),
+													  height: Int(subRectangle.height)) else {
+				throw VNCError.protocol(.subrectangleOutOfBounds(encodingType: encodingType,
+																 subrectangle: .init(x: .init(subRectangle.xPosition),
+																					 y: .init(subRectangle.yPosition),
+																					 width: .init(subRectangle.width),
+																					 height: .init(subRectangle.height)),
+																 bounds: rectangle.region.size))
+			}
 
 			var foregroundPixelValue = subRectangle.pixelValue
 

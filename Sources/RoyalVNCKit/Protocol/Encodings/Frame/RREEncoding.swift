@@ -33,10 +33,27 @@ extension VNCProtocol.RREEncoding {
 			let subRectangle = try await SubRectangle.receive(bytesPerPixel: bytesPerPixel,
 															  connection: connection)
 
-			let subRegion = VNCRegion(x: rectangle.xPosition + subRectangle.xPosition,
-									  y: rectangle.yPosition + subRectangle.yPosition,
-									  width: subRectangle.width,
-									  height: subRectangle.height)
+			// RFC 6143 7.7.3: a sub-rectangle's x and y are "the coordinates of the subrectangle
+			// relative to the top-left corner of the rectangle", and the sub-rectangles are a
+			// partition of it, "rectangular subregions ... the union of which comprises the
+			// original rectangular region" (rfbproto.rst, RRE Encoding, lines 3203-3215). One
+			// that does not lie inside its rectangle is a server breaking the protocol, not an
+			// element to skip: what it was meant to draw cannot be known, drawing it would paint
+			// pixels the update never claimed, and the rest of the update is the same encoder's
+			// work. So the update stops and the session ends with the error, as it does for a
+			// rectangle outside the framebuffer (FramebufferUpdate.receive). The position used
+			// to be a UInt16 sum, and a sub-rectangle at 0xFFFF trapped.
+			guard let subRegion = rectangle.subregion(x: Int(subRectangle.xPosition),
+													  y: Int(subRectangle.yPosition),
+													  width: Int(subRectangle.width),
+													  height: Int(subRectangle.height)) else {
+				throw VNCError.protocol(.subrectangleOutOfBounds(encodingType: encodingType,
+																 subrectangle: .init(x: subRectangle.xPosition,
+																					 y: subRectangle.yPosition,
+																					 width: subRectangle.width,
+																					 height: subRectangle.height),
+																 bounds: rectangle.region.size))
+			}
 
 			var foregroundPixelValue = subRectangle.pixelValue
 

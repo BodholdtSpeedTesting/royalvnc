@@ -520,6 +520,10 @@ private extension VNCConnection {
 
 		logger.logDebug("Received Server Init \(serverInit)")
 
+		// Before anything is sent back or allocated: see VNCFramebuffer.maximumPixelCount.
+		try VNCFramebuffer.validateSize(.init(width: serverInit.framebufferWidth,
+											  height: serverInit.framebufferHeight))
+
 		state.framebufferWidth = serverInit.framebufferWidth
 		state.framebufferHeight = serverInit.framebufferHeight
 		state.desktopName = serverInit.name

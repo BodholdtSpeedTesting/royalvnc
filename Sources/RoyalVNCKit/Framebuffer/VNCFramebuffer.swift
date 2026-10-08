@@ -127,6 +127,10 @@ public final class VNCFramebuffer: NSObjectOrAnyObject {
 		 screens: [VNCScreen],
 		 pixelFormat: VNCProtocol.PixelFormat,
          allocator: VNCFramebufferAllocator?) throws {
+		// Where ServerInit's and a resize's own checks have not refused it already: nothing
+		// above the ceiling is allocated.
+		try Self.validateSize(size)
+
 		let width = Int(size.width)
 		let height = Int(size.height)
 
@@ -199,6 +203,42 @@ public final class VNCFramebuffer: NSObjectOrAnyObject {
 
 	deinit {
         allocator.deallocate(buffer: surfaceAddress)
+	}
+}
+
+// MARK: - Size Ceiling
+extension VNCFramebuffer {
+	/// The most pixels a framebuffer may have: 2^28, 268,435,456, which at the four bytes a pixel
+	/// the kit keeps is 1 GiB.
+	///
+	/// A ServerInit (RFC 6143 7.3.2), a DesktopSize (7.8.2) and an ExtendedDesktopSize
+	/// (rfbproto.rst, lines 4283-4433) each give the framebuffer's width and height as two U16s
+	/// the server chooses, and the specification puts no ceiling on them. Every pixel is
+	/// allocated, and zeroed where the allocator is malloc's (Linux, Windows): at 65,535 x
+	/// 65,535 that is 4,294,836,225 pixels, about seventeen gigabytes, which ends in the process
+	/// being killed for want of memory rather than in an error anyone can read. A server need not
+	/// be authenticated to send ServerInit's size -- with security type None nothing is -- and a
+	/// DesktopSize is a pseudo-rectangle, exempt from the bound on rectangles because it is
+	/// meant to be larger than the framebuffer.
+	///
+	/// The ceiling comfortably exceeds real desktops. An 8K UHD display is 7,680 x 4,320,
+	/// 33,177,600 pixels: four of them side by side, 30,720 x 4,320, are 132,710,400, half the
+	/// ceiling, and even eight, 61,440 x 4,320, are 265,420,800, inside it, as is a 16,384 x
+	/// 16,384 desktop, exactly 2^28. The largest size a U16 width and height can say is nearly
+	/// sixteen times it.
+	static let maximumPixelCount = 1 << 28
+
+	/// Throws `framebufferTooLarge` for a size of more than `maximumPixelCount` pixels.
+	///
+	/// A server sending one is not breaking a rule RFC 6143 states, but no session with it can go
+	/// on: its every rectangle is a part of a framebuffer this client will not allocate. So the
+	/// session ends with the error -- a ServerInit's before the client sends anything more, a
+	/// resize's before the framebuffer is replaced.
+	static func validateSize(_ size: VNCSize) throws {
+		guard Int(size.width) * Int(size.height) <= maximumPixelCount else {
+			throw VNCError.protocol(.framebufferTooLarge(width: size.width,
+														  height: size.height))
+		}
 	}
 }
 

@@ -529,22 +529,157 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertEqual(bytes[4 * 4 + 4 + 2], 0xff)
 		XCTAssertEqual(logger.errorCount, 1)
 	}
+
+	// MARK: - A ceiling on the framebuffer: ServerInit, DesktopSize, ExtendedDesktopSize
+
+	/// 2^28 pixels. Four 8K UHD displays side by side, 30,720 x 4,320, are half of it, and eight,
+	/// 61,440 x 4,320, are inside it; a 16,384 x 16,384 desktop is exactly it; 65,535 x 4,096 is
+	/// inside and 65,535 x 4,097 not.
+	func testFramebufferSizeCeiling() throws {
+		XCTAssertEqual(VNCFramebuffer.maximumPixelCount, 268_435_456)
+
+		for (width, height) in [(30720, 4320), (61440, 4320), (16384, 16384), (65535, 4096), (7680, 4320), (0, 65535)] {
+			XCTAssertNoThrow(try VNCFramebuffer.validateSize(.init(width: UInt16(width), height: UInt16(height))),
+							 "\(width)x\(height)")
+		}
+
+		for (width, height) in [(16384, 16385), (65535, 4097), (65535, 65535)] {
+			XCTAssertThrowsError(try VNCFramebuffer.validateSize(.init(width: UInt16(width), height: UInt16(height))),
+								 "\(width)x\(height)") { error in
+				assertServerRefused(error, naming: "framebufferTooLarge")
+			}
+		}
+
+		// Refused before the allocator is asked for anything: seventeen gigabytes, zeroed, at 2ad33e2.
+		// Asked of one that refuses past 64 MiB, so that should the refusal ever go, this test fails
+		// rather than taking that much memory from whoever runs it.
+		let allocator = CappedAllocator(limit: 64 * 1024 * 1024)
+
+		XCTAssertThrowsError(try VNCFramebuffer(logger: QuietLogger(),
+												size: .init(width: 65535, height: 65535),
+												screens: [ ],
+												pixelFormat: .init(depth: 24),
+												allocator: allocator)) { error in
+			assertServerRefused(error, naming: "framebufferTooLarge")
+		}
+
+		XCTAssertEqual(allocator.refused, [ ], "the allocator was asked for the framebuffer")
+	}
+
+	/// RFC 6143 7.8.2. The framebuffer is not replaced here -- a connection does that, in its
+	/// framebuffer delegate -- so a size up to the ceiling is only recorded, never allocated.
+	func testDesktopSizePastTheCeilingIsRefused() async throws {
+		let session = try TestSession(width: 32, height: 32, depth: 24)
+
+		func update(width: UInt16, height: UInt16) -> ServerStream {
+			var stream = ServerStream()
+			stream.framebufferUpdateHeader(rectangles: 1)
+			stream.rectangle(x: 0, y: 0, width: width, height: height, encoding: -223)
+
+			return stream
+		}
+
+		try await session.receiveFramebufferUpdate(update(width: 61440, height: 4320))
+
+		for (width, height) in [(UInt16(16384), UInt16(16385)), (65535, 65535)] {
+			do {
+				try await session.receiveFramebufferUpdate(update(width: width, height: height))
+
+				XCTFail("a DesktopSize of \(width)x\(height) was accepted")
+			} catch {
+				assertServerRefused(error, naming: "framebufferTooLarge")
+			}
+		}
+
+		XCTAssertEqual(session.resizes, [.init(width: 61440, height: 4320)])
+	}
+
+	/// rfbproto.rst's ExtendedDesktopSize: the same ceiling, its screens read first.
+	func testExtendedDesktopSizePastTheCeilingIsRefused() async throws {
+		let session = try TestSession(width: 32, height: 32, depth: 24)
+
+		func update(width: UInt16, height: UInt16) -> ServerStream {
+			var stream = ServerStream()
+			stream.framebufferUpdateHeader(rectangles: 1)
+			stream.rectangle(x: 0, y: 0, width: width, height: height, encoding: -308)
+			stream.u8(1)                        // number-of-screens
+			stream.append([0, 0, 0])            // padding
+			stream.u32(7)                       // id
+			stream.u16(0); stream.u16(0)        // x-position, y-position
+			stream.u16(width); stream.u16(height)
+			stream.u32(0)                       // flags
+
+			return stream
+		}
+
+		try await session.receiveFramebufferUpdate(update(width: 61440, height: 4320))
+
+		do {
+			try await session.receiveFramebufferUpdate(update(width: 65535, height: 65535))
+
+			XCTFail("an ExtendedDesktopSize of 65535x65535 was accepted")
+		} catch {
+			assertServerRefused(error, naming: "framebufferTooLarge")
+		}
+
+		XCTAssertEqual(session.resizes, [.init(width: 61440, height: 4320)])
+	}
+
+	/// ServerInit (RFC 6143 7.3.2) through a whole handshake: a connection whose server says
+	/// 65535x65535 ends with the error, having sent nothing after ClientInit; one whose server says
+	/// 64x48 makes its framebuffer.
+	func testServerInitPastTheCeilingEndsTheConnection() async throws {
+		let refused = try await ScriptedServer.connect(width: 65535, height: 65535)
+
+		guard case .disconnected(let reason) = refused.outcome else {
+			XCTFail("a ServerInit of 65535x65535 ended in \(refused.outcome)")
+
+			return
+		}
+
+		XCTAssertTrue(reason.contains("framebufferTooLarge"), reason)
+		XCTAssertEqual(refused.written, 12 + 1 + 1, "ProtocolVersion, the security type and ClientInit, and nothing after")
+
+		let accepted = try await ScriptedServer.connect(width: 64, height: 48)
+
+		guard case .framebuffer(let width, let height) = accepted.outcome else {
+			XCTFail("a ServerInit of 64x48 ended in \(accepted.outcome)")
+
+			return
+		}
+
+		XCTAssertEqual(width, 64)
+		XCTAssertEqual(height, 48)
+	}
 }
 
 // MARK: - A session's worth of decoding, without a connection
 
 /// A framebuffer at a size and depth, the decoder table a VNCConnection builds, and a way to read
-/// back what was drawn.
-final class TestSession {
+/// back what was drawn. It is the framebuffer's delegate, as a connection is, and records the
+/// sizes a resize asks for without making a framebuffer of any of them.
+final class TestSession: VNCFramebufferDelegate {
 	let logger = QuietLogger()
 	let framebuffer: VNCFramebuffer
 	let encodings: Encodings
+
+	private(set) var resizes = [VNCSize]()
 
 	private let connection: VNCConnection
 
 	init(width: UInt16, height: UInt16, depth: UInt8) throws {
 		framebuffer = try makeTestFramebuffer(width: width, height: height, depth: depth, logger: logger)
 		(connection, encodings) = makeTestEncodings(logger: logger)
+
+		framebuffer.delegate = self
+	}
+
+	func framebuffer(_ framebuffer: VNCFramebuffer, didUpdateRegion updatedRegion: VNCRegion) { }
+	func framebuffer(_ framebuffer: VNCFramebuffer, didUpdateDesktopName newDesktopName: String) { }
+	func framebuffer(_ framebuffer: VNCFramebuffer, didUpdateCursor cursor: VNCCursor) { }
+
+	func framebuffer(_ framebuffer: VNCFramebuffer, sizeDidChange newSize: VNCSize, screens newScreens: [VNCScreen]) {
+		resizes.append(newSize)
 	}
 
 	/// Hands `stream` -- a FramebufferUpdate after its message-type byte -- to the kit, and checks

@@ -36,6 +36,10 @@ public extension VNCError {
 		/// colour map.
 		case colourMapEntriesOutOfRange(firstColour: UInt16, numberOfColours: Int, colourMapSize: Int)
 
+		/// A ServerInit, DesktopSize or ExtendedDesktopSize giving a framebuffer of more than
+		/// `VNCFramebuffer.maximumPixelCount` pixels.
+		case framebufferTooLarge(width: UInt16, height: UInt16)
+
 		// MARK: - LocalizedError
 		public var errorDescription: String? {
 			// TODO: Localize
@@ -92,6 +96,8 @@ public extension VNCError {
 						: "entries from \(firstColour)"
 
 					return "Colour map \(entries) were retrieved, beyond the \(colourMapSize) entries of the colour map."
+				case .framebufferTooLarge(let width, let height):
+					return "A framebuffer size of \(width)x\(height) was retrieved, \(Int(width) * Int(height)) pixels, more than the \(VNCFramebuffer.maximumPixelCount) this client will allocate."
 			}
 		}
 	}

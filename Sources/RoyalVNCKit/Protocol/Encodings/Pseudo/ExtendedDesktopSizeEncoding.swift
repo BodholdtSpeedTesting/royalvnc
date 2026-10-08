@@ -58,6 +58,12 @@ extension VNCProtocol.ExtendedDesktopSizeEncoding {
 			screens.append(screen)
 		}
 
+		// rfbproto.rst, lines 4389-4390: "The width and height indicates the new width and height
+		// of the framebuffer." Refused above the ceiling, after the screens are read and before
+		// the framebuffer is replaced, which ends the session: see
+		// VNCFramebuffer.maximumPixelCount.
+		try VNCFramebuffer.validateSize(newSize)
+
 		framebuffer.resize(to: newSize,
 						   screens: screens)
 	}

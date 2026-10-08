@@ -48,6 +48,45 @@ final class ConfirmedTrapTests: XCTestCase {
 
 		withExtendedLifetime(connection) { }
 	}
+
+	/// RFC 6143 7.6.2: SetColourMapEntries sets the entries first-colour onwards, one per colour
+	/// sent. 2ad33e2 walked `Int(firstColour)..<colours.count` -- a range whose lower bound passes
+	/// its upper bound when the first colour is beyond the number of colours, which traps. Here
+	/// one colour at entry 300, in a session whose pixel format uses a colour map: the kit's 8-bit
+	/// depth, eight bits a pixel, so 256 entries and no entry 300 for any pixel to name.
+	func testColourMapUpdateBeyondTheColoursSentIsRefused() async throws {
+		let framebuffer = try makeTestFramebuffer(width: 4, height: 4, depth: 8)
+
+		var stream = ServerStream()
+		stream.setColourMapEntries(firstColour: 300, colours: [(0xffff, 0, 0)])
+
+		let entries = try await VNCProtocol.SetColourMapEntries.receive(connection: ScriptedReader(stream.bytes),
+																		logger: QuietLogger())
+
+		XCTAssertEqual(entries.firstColour, 300)
+		XCTAssertEqual(entries.colors.count, 1)
+
+		XCTAssertThrowsError(try framebuffer.updateColorMap(entries)) { error in
+			assertServerRefused(error, naming: "colourMap")
+		}
+	}
+
+	/// The same message in a true-colour session -- the app's, at 24 bits -- where there is no
+	/// colour map for it to set. 2ad33e2 trapped here too; the message is now read and dropped.
+	func testColourMapUpdateBeyondTheColoursSentIsDroppedInATrueColourSession() async throws {
+		let framebuffer = try makeTestFramebuffer(width: 4, height: 4, depth: 24)
+
+		var stream = ServerStream()
+		stream.setColourMapEntries(firstColour: 300, colours: [(0xffff, 0, 0)])
+
+		let reader = ScriptedReader(stream.bytes)
+		let entries = try await VNCProtocol.SetColourMapEntries.receive(connection: reader,
+																		logger: QuietLogger())
+
+		XCTAssertEqual(reader.remaining, 0, "the message was not read to its end")
+
+		try framebuffer.updateColorMap(entries)
+	}
 }
 
 /// That `error` is the kit refusing what a server sent -- a protocol error, which the app shows

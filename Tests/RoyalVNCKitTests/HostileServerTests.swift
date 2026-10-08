@@ -137,6 +137,67 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertEqual(session.pixel(293, 1), 0x11_22_33)
 		XCTAssertEqual(session.pixel(295, 1), 0, "drawn outside the rectangle")
 	}
+
+	// MARK: - SetColourMapEntries: entries inside the colour map (RFC 6143 7.6.2)
+
+	/// A server mapping the pixel values of the kit's 8-bit depth, the one format of its that uses
+	/// a colour map, then a Raw rectangle of those values.
+	func testColourMapColoursAnEightBitSessionsPixels() async throws {
+		let session = try TestSession(width: 4, height: 1, depth: 8)
+
+		try await session.receiveColourMapEntries(firstColour: 0, colours: [
+			(0xffff, 0, 0), (0, 0xffff, 0), (0, 0, 0xffff), (0xffff, 0xffff, 0xffff)
+		])
+
+		try await session.receiveRawRectangle(width: 4, height: 1, pixels: [0, 1, 2, 3])
+
+		XCTAssertEqual((0..<4).map { session.pixel($0, 0) }, [0xff_00_00, 0x00_ff_00, 0x00_00_ff, 0xff_ff_ff])
+	}
+
+	/// "Note that this message may only update part of the color map" (7.6.2). 2ad33e2 replaced
+	/// the whole map with each message and kept only the colours from index first-colour of
+	/// those sent -- so this one, one colour for entry 2, trapped there.
+	func testColourMapUpdateSetsOnlyTheEntriesItNames() async throws {
+		let session = try TestSession(width: 4, height: 1, depth: 8)
+
+		try await session.receiveColourMapEntries(firstColour: 0, colours: [
+			(0xffff, 0, 0), (0, 0xffff, 0), (0, 0, 0xffff), (0xffff, 0xffff, 0xffff)
+		])
+		try await session.receiveColourMapEntries(firstColour: 2, colours: [(0x8000, 0x8000, 0x8000)])
+
+		try await session.receiveRawRectangle(width: 4, height: 1, pixels: [0, 1, 2, 3])
+
+		XCTAssertEqual((0..<4).map { session.pixel($0, 0) }, [0xff_00_00, 0x00_ff_00, 0x80_80_80, 0xff_ff_ff])
+	}
+
+	/// An 8-bit pixel names 256 entries. The last can be set; one past it cannot.
+	func testColourMapEntriesPastTheEightBitMapAreRefused() async throws {
+		let session = try TestSession(width: 4, height: 1, depth: 8)
+
+		try await session.receiveColourMapEntries(firstColour: 255, colours: [(0xffff, 0, 0)])
+		try await session.receiveColourMapEntries(firstColour: 256, colours: [])
+
+		do {
+			try await session.receiveColourMapEntries(firstColour: 255, colours: [(0, 0xffff, 0), (0, 0, 0xffff)])
+
+			XCTFail("colour map entries 255 and 256 were accepted for an 8-bit pixel")
+		} catch {
+			assertServerRefused(error, naming: "colourMap")
+		}
+
+		try await session.receiveRawRectangle(width: 1, height: 1, pixels: [255])
+
+		XCTAssertEqual(session.pixel(0, 0), 0xff_00_00, "entry 255 lost to the refused message")
+	}
+
+	func testColourMapEntriesAreDroppedInATrueColourSession() async throws {
+		let session = try TestSession(width: 4, height: 1, depth: 24)
+
+		try await session.receiveColourMapEntries(firstColour: 0, colours: [(0xffff, 0, 0)])
+		try await session.receiveColourMapEntries(firstColour: 65535, colours: [(0xffff, 0, 0), (0, 0xffff, 0)])
+
+		XCTAssertNil(session.framebuffer.colorMap)
+	}
 }
 
 // MARK: - A session's worth of decoding, without a connection
@@ -169,6 +230,29 @@ final class TestSession {
 		XCTAssertEqual(reader.remaining, 0, "the update was not read to its end")
 
 		return update
+	}
+
+	/// Hands the kit a SetColourMapEntries, as a session does: read, then given to the framebuffer.
+	func receiveColourMapEntries(firstColour: UInt16, colours: [(UInt16, UInt16, UInt16)]) async throws {
+		var stream = ServerStream()
+		stream.setColourMapEntries(firstColour: firstColour, colours: colours)
+
+		let reader = ScriptedReader(stream.bytes)
+		let entries = try await VNCProtocol.SetColourMapEntries.receive(connection: reader, logger: logger)
+
+		XCTAssertEqual(reader.remaining, 0, "the message was not read to its end")
+
+		try framebuffer.updateColorMap(entries)
+	}
+
+	/// A Raw rectangle at the origin, its pixels one byte each (the kit's 8-bit depth).
+	func receiveRawRectangle(width: UInt16, height: UInt16, pixels: [UInt8]) async throws {
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 0, y: 0, width: width, height: height, encoding: 0)
+		stream.append(pixels)
+
+		try await receiveFramebufferUpdate(stream)
 	}
 
 	/// The pixel drawn at x, y, as 0xRRGGBB.

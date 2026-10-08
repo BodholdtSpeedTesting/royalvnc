@@ -333,8 +333,39 @@ extension VNCFramebuffer {
 		unlockSurfaceReadWrite()
 	}
 
-	func updateColorMap(_ entries: VNCProtocol.SetColourMapEntries) {
-		let colorMap = ColorMap(entries: entries)
+	/// RFC 6143 7.6.2, SetColourMapEntries: "the specified pixel values should be mapped to the
+	/// given RGB values", the entries first-colour onwards, one per colour sent.
+	///
+	/// In a session whose pixel format uses a colour map, entries must lie inside it -- one per
+	/// pixel value the format can carry, `ColorMap.capacity` -- and a message naming any beyond
+	/// it throws `colourMapEntriesOutOfRange`, ending the session: it maps pixel values that do
+	/// not exist, which is a server breaking the protocol, not one entry gone astray. Until this,
+	/// a first colour past the number of colours sent made a range whose lower bound passed its
+	/// upper bound, and trapped.
+	///
+	/// In a true-colour session -- the app's, at 24 bits -- there is no colour map, and 7.6.2 has a
+	/// server send this "only when the agreed pixel format uses a color map". It is read, as it
+	/// must be to stay in step, and dropped: nothing reads a colour map there (the pixel's own
+	/// red, green and blue are its colour), so dropping it changes nothing drawn, and a server
+	/// sending one anyway breaks a "should not", which is no reason to end a working session.
+	func updateColorMap(_ entries: VNCProtocol.SetColourMapEntries) throws {
+		guard sourceProperties.usesColorMap else {
+			logger.logDebug("Dropping Set Colour Map Entries: this session's pixel format is true colour")
+
+			return
+		}
+
+		let capacity = ColorMap.capacity(bitsPerPixel: sourceProperties.bitsPerPixel)
+
+		guard Int(entries.firstColour) + entries.colors.count <= capacity else {
+			throw VNCError.protocol(.colourMapEntriesOutOfRange(firstColour: entries.firstColour,
+																numberOfColours: entries.colors.count,
+																colourMapSize: capacity))
+		}
+
+		var colorMap = self.colorMap ?? ColorMap()
+
+		colorMap.set(entries)
 
 		self.colorMap = colorMap
 	}

@@ -99,7 +99,7 @@ private extension VNCConnection {
 
 		logger.logDebug("Received Colour Map Entries")
 
-		framebuffer.updateColorMap(colourMapEntries)
+		try framebuffer.updateColorMap(colourMapEntries)
 	}
 
 	func handleServerCutTextMessage() async throws {

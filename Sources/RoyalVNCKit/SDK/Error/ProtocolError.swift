@@ -32,6 +32,10 @@ public extension VNCError {
 		/// area, and `bounds` the area's size.
 		case subrectangleOutOfBounds(encodingType: VNCEncodingType, subrectangle: VNCRegion, bounds: VNCSize)
 
+		/// A SetColourMapEntries naming entries beyond the `colourMapSize` entries of the session's
+		/// colour map.
+		case colourMapEntriesOutOfRange(firstColour: UInt16, numberOfColours: Int, colourMapSize: Int)
+
 		// MARK: - LocalizedError
 		public var errorDescription: String? {
 			// TODO: Localize
@@ -82,6 +86,12 @@ public extension VNCError {
 					let encodingName = VNCFrameEncodingType(rawValue: encodingType)?.description ?? "\(encodingType.rawValue)"
 
 					return "A sub-rectangle of \(subrectangle.width)x\(subrectangle.height) at \(subrectangle.x),\(subrectangle.y) was retrieved in \(encodingName) data that does not lie inside the \(bounds.width)x\(bounds.height) area it belongs to."
+				case .colourMapEntriesOutOfRange(let firstColour, let numberOfColours, let colourMapSize):
+					let entries = numberOfColours > 0
+						? "entries \(firstColour) to \(Int(firstColour) + numberOfColours - 1)"
+						: "entries from \(firstColour)"
+
+					return "Colour map \(entries) were retrieved, beyond the \(colourMapSize) entries of the colour map."
 			}
 		}
 	}

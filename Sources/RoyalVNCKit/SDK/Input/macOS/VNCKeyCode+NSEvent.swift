@@ -19,7 +19,8 @@ extension VNCKeyCode {
 	///   where that is the key's own character (`isOwnCharacter`): the same as
 	///   `charactersIgnoringModifiers`, or what the key types at the event's Shift and Caps Lock
 	///   with no dead key pending (`charactersWithoutDeadKeys`, `charactersWithoutDeadKeys(of:)`)
-	///   and within Latin-1. That is what Caps Lock makes of a letter -- 'A', 'É', 'Ä' -- and
+	///   and within keysymdef.h's Latin-1 (U+0020-U+007E and U+00A0-U+00FF, `hasLatin1Keysym`).
+	///   That is what Caps Lock makes of a letter -- 'A', 'É', 'Ä' -- and
 	///   whatever else a layout puts on its Caps Lock level: the English letters of Apple's Hebrew,
 	///   the digits of Arabic and of French - Numerical. RFC 6143 §7.5.4 makes the case of a keysym
 	///   significant ("a server receiving an upper case 'A' keysym without any shift presses should
@@ -42,7 +43,12 @@ extension VNCKeyCode {
 	///   - a character beyond Latin-1: İ for i on a Turkish layout under Caps Lock, “ for 2 on
 	///     Hebrew - QWERTY. The kit sends such a character as its bare code point (`withCharacter`),
 	///     which is not the keysym X11 gives it (that is the code point plus 0x1000000), and no
-	///     server maps 0x130 to İ; a Latin-1 character's keysym is its code point.
+	///     server maps 0x130 to İ; a Latin-1 character's keysym is its code point;
+	///   - a control character, which keysymdef.h's Latin-1 leaves out (U+0000-U+001F,
+	///     U+007F-U+009F): U+0003 at Caps Lock on the § key of Apple's Arabic layout, U+0010 on
+	///     Thai's JIS Eisu and Kana keys. `withCharacter` would send a C0 control or DEL as its code
+	///     point, which is no keysym -- keysymdef.h gives the control keys keysyms of their own,
+	///     BackSpace 0xff08 among them -- and a C1 control as nothing.
 	/// * A shortcut -- Command, Control or Option held -- sends `charactersIgnoringModifiers`,
 	///   the key's character with Shift alone: those modifiers are the server's to apply ("the
 	///   state of modifier keys such as Control and Alt should be taken as modifying the
@@ -85,8 +91,8 @@ extension VNCKeyCode {
 	/// * never where it is empty and that is not: a dead key's, or a key with nothing on the level in
 	///   use, sends `charactersIgnoringModifiers`, whatever the layout says the key types alone;
 	/// * else where it is what the key types at the event's Shift and Caps Lock with no dead key
-	///   pending (`charactersWithoutDeadKeys`), and within Latin-1 (U+00FF and below, each such
-	///   character's keysym being its code point; keysymdef.h);
+	///   pending (`charactersWithoutDeadKeys`), and each of its characters has a Latin-1 keysym
+	///   (`hasLatin1Keysym`): not a control character, which has none;
 	/// * where the layout could not be asked (`charactersWithoutDeadKeys` nil), where both are ASCII
 	///   and it is `charactersIgnoringModifiers`' capital, as before.
 	static func isOwnCharacter(_ characters: String,
@@ -106,7 +112,38 @@ extension VNCKeyCode {
 		}
 
 		return characters == charactersWithoutDeadKeys
-			&& characters.unicodeScalars.allSatisfy { $0.value <= 0xff }
+			&& characters.unicodeScalars.allSatisfy(hasLatin1Keysym)
+	}
+
+	/// Whether a character is one of keysymdef.h's Latin-1 characters -- "Latin 1 (ISO/IEC 8859-1 =
+	/// Unicode U+0020..U+00FF)", XK_space 0x0020 to XK_asciitilde 0x007e and XK_nobreakspace 0x00a0
+	/// to XK_ydiaeresis 0x00ff -- each of which has its code point as its keysym. Not a control
+	/// character, U+0000-U+001F or U+007F-U+009F, which has no keysym there.
+	static func hasLatin1Keysym(_ scalar: Unicode.Scalar) -> Bool {
+		(0x20...0x7e).contains(scalar.value)
+			|| (0xa0...0xff).contains(scalar.value)
+	}
+
+	/// Whether what a server makes of a key's keysyms can turn on Shift, so that the Shift it went
+	/// down under is remembered with them, and a repeat under another Shift pressed anew
+	/// (HeldKeyCodes):
+	///
+	/// * a key with no keysym of its own (`from(cgKeyCode:)` nil), whose keysyms are characters: a
+	///   capital under Caps Lock, which a server pressing its held key again under the Shift it holds
+	///   then would type in the other case; a keypad digit, which a server types by its layout's
+	///   number-row key -- '%' under Shift where the Mac types '5';
+	/// * the keypad's =, which a server with no such key types as the character '=' by the key that
+	///   carries it -- '+' under Shift on a US layout, where the Mac types '='.
+	///
+	/// Not any other key with a keysym of its own -- Space, Return, Tab, Delete, Escape, the arrows,
+	/// Home, End, Page Up and Down, Help, F1-F19, the keypad's Clear, /, *, -, +, Enter and decimal
+	/// point, the modifiers. Its keysym is the same whatever Shift, and a server that presses a held
+	/// one again at a repeat does so under the Shift it holds then, to the same effect as a new press:
+	/// Shift and an arrow, a space. Pressed anew, the key would be let go of mid-hold for nothing,
+	/// which a program that reads keys sees -- a held Space released.
+	static func isShiftSignificant(cgKeyCode: CGKeyCode) -> Bool {
+		from(cgKeyCode: cgKeyCode) == nil
+			|| cgKeyCode == CGKeyCodes.ansiKeypadEquals
 	}
 
 	/// The keys a key event sends, from its key code, its two strings, what its key types at its Shift

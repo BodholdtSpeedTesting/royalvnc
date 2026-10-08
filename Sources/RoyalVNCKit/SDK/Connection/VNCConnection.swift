@@ -427,6 +427,18 @@ public final class VNCConnection: NSObjectOrAnyObject {
 
 	let clientToServerMessageQueue = Queue<VNCSendableMessage>()
 
+#if os(macOS)
+	/// What each key the Mac framebuffer view saw go down sent, so that its key-up sends the same
+	/// (HeldKeyCodes). Kept here rather than in the view: an embedder may put a new view on this
+	/// connection while a key is held -- one that builds a view per framebuffer does when the
+	/// server's screen size changes -- and the key's key-up, reaching the new view, is to let go of
+	/// what the old one pressed, which the server still holds. A new connection holds nothing.
+	///
+	/// Touched only by the view's key handling, on the main thread, where AppKit delivers key
+	/// events; no lock, as the view's own record had none.
+	var heldKeyCodes = HeldKeyCodes()
+#endif
+
     /// Which buttons are held, read by every pointer event.
     ///
     /// Read-only from outside, because an `insert` or a `remove` through a

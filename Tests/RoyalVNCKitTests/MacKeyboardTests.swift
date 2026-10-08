@@ -27,6 +27,7 @@ private enum Key {
 	static let h: UInt16 = 0x04            // kVK_ANSI_H
 	static let x: UInt16 = 0x07            // kVK_ANSI_X
 	static let c: UInt16 = 0x08            // kVK_ANSI_C
+	static let isoSection: UInt16 = 0x0a   // kVK_ISO_Section: '§', and U+0003 at Caps Lock on Arabic
 	static let b: UInt16 = 0x0b            // kVK_ANSI_B
 	static let e: UInt16 = 0x0e            // kVK_ANSI_E
 	static let one: UInt16 = 0x12          // kVK_ANSI_1: '&' on French - Numerical, '١' on Arabic
@@ -36,6 +37,8 @@ private enum Key {
 	static let zero: UInt16 = 0x1d         // kVK_ANSI_0
 	static let leftBracket: UInt16 = 0x21  // kVK_ANSI_LeftBracket: the '^' dead key on a French layout
 	static let i: UInt16 = 0x22            // kVK_ANSI_I: 'ı' and 'I' on Turkish Q
+	static let p: UInt16 = 0x23            // kVK_ANSI_P
+	static let returnKey: UInt16 = 0x24    // kVK_Return
 	static let quote: UInt16 = 0x27        // kVK_ANSI_Quote: 'i' and 'İ' on Turkish Q; the ' and " dead keys on US International - PC; 'ä' on German
 	static let backslash: UInt16 = 0x2a    // kVK_ANSI_Backslash
 	static let semicolon: UInt16 = 0x29    // kVK_ANSI_Semicolon: 'ñ' on Spanish - ISO
@@ -44,8 +47,13 @@ private enum Key {
 	static let shift: UInt16 = 0x38        // kVK_Shift
 	static let capsLock: UInt16 = 0x39     // kVK_CapsLock
 	static let option: UInt16 = 0x3a       // kVK_Option
+	static let keypadPlus: UInt16 = 0x45   // kVK_ANSI_KeypadPlus
+	static let keypadEquals: UInt16 = 0x51 // kVK_ANSI_KeypadEquals
 	static let keypad5: UInt16 = 0x57      // kVK_ANSI_Keypad5
+	static let f5: UInt16 = 0x60           // kVK_F5
+	static let jisEisu: UInt16 = 0x66      // kVK_JIS_Eisu: nothing, and U+0010 at Caps Lock on Thai
 	static let leftArrow: UInt16 = 0x7b    // kVK_LeftArrow
+	static let rightArrow: UInt16 = 0x7c   // kVK_RightArrow
 }
 
 private func keyEvent(_ type: NSEvent.EventType,
@@ -158,6 +166,34 @@ final class MacKeyEventKeyCodesTests: XCTestCase {
 					   "Hebrew - PC's H key at Caps Lock and Shift types the Hebrew letter: H, as before")
 		XCTAssertEqual(sent(keyEvent(.keyDown, Key.quote, "İ", ignoring: "İ", flags: [ .capsLock, .shift ])), [ 0x130 ],
 					   "Turkish Q with Shift as well: the one string either way, as before")
+	}
+
+	func testAControlCharacterSendsTheCharacterIgnoringModifiers() {
+		// Apple's layout data (MacKeyCharactersWithoutDeadKeysTests): Arabic's § key types U+0003 at Caps Lock, and Thai's
+		// Eisu key U+0010 there, with nothing at Shift alone. keysymdef.h has no keysym 0x03 or 0x10.
+		XCTAssertEqual(sent(keyEvent(.keyDown, Key.isoSection, "\u{3}", ignoring: "\u{A7}", flags: .capsLock)), [ 0xa7 ],
+					   "Arabic's § key at Caps Lock: §, as before -- not 0x03")
+		XCTAssertEqual(sent(keyEvent(.keyDown, Key.jisEisu, "\u{10}", ignoring: "", flags: .capsLock)), [ ],
+					   "Thai's Eisu key at Caps Lock: nothing, as before -- not 0x10")
+	}
+
+	func testOnlyCharactersWithALatin1KeysymAreTheKeysOwn() {
+		// keysymdef.h's Latin-1: XK_space 0x20 to XK_asciitilde 0x7e, XK_nobreakspace 0xa0 to XK_ydiaeresis 0xff.
+		func own(_ characters: String) -> Bool {
+			VNCKeyCode.isOwnCharacter(characters, charactersIgnoringModifiers: "x", charactersWithoutDeadKeys: characters)
+		}
+
+		XCTAssertTrue(own(" "), "U+0020")
+		XCTAssertTrue(own("~"), "U+007E")
+		XCTAssertTrue(own("\u{A0}"), "U+00A0")
+		XCTAssertTrue(own("\u{FF}"), "U+00FF")
+		XCTAssertFalse(own("\u{0}"), "U+0000, a C0 control")
+		XCTAssertFalse(own("\u{1F}"), "U+001F, a C0 control")
+		XCTAssertFalse(own("\u{7F}"), "U+007F, DEL")
+		XCTAssertFalse(own("\u{80}"), "U+0080, a C1 control")
+		XCTAssertFalse(own("\u{9F}"), "U+009F, a C1 control")
+		XCTAssertFalse(own("\u{100}"), "U+0100, beyond Latin-1")
+		XCTAssertFalse(own("A\u{3}"), "every character, not the first")
 	}
 
 	func testACharactersCarryingAPendingDeadKeySendsTheCharacterIgnoringModifiers() {
@@ -354,6 +390,10 @@ final class MacKeyCharactersWithoutDeadKeysTests: XCTestCase {
 		XCTAssertEqual(try types("Spanish-ISO", Key.semicolon, .capsLock), "\u{D1}")
 		XCTAssertEqual(try types("Turkish-QWERTY-PC", Key.quote, .capsLock), "\u{130}")
 		XCTAssertEqual(try types("Turkish-QWERTY-PC", Key.i, .capsLock), "I")
+		XCTAssertEqual(try types("Arabic", Key.isoSection, [ ]), "\u{A7}")
+		XCTAssertEqual(try types("Arabic", Key.isoSection, .capsLock), "\u{3}", "Arabic's § key types a control character at Caps Lock")
+		XCTAssertEqual(try types("Thai", Key.jisEisu, .shift), "", "Thai's Eisu key types nothing at Shift alone")
+		XCTAssertEqual(try types("Thai", Key.jisEisu, .capsLock), "\u{10}", "and a control character at Caps Lock")
 	}
 
 	func testADeadKeyAnswersWithItsOwnCharacter() throws {
@@ -622,6 +662,21 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 
 	private func flags(_ keyCode: UInt16, _ flags: NSEvent.ModifierFlags) {
 		view.flagsChanged(with: keyEvent(.flagsChanged, keyCode, "", ignoring: "", flags: flags))
+	}
+
+	/// A new view on the same connection in the old one's place, as an embedder that builds a view per framebuffer
+	/// makes when the server's screen size changes; the helpers above drive it from then on.
+	private func replaceView() throws {
+		framebuffer = try VNCFramebuffer(logger: connection.logger,
+										 size: .init(width: 16, height: 16),
+										 screens: [ ],
+										 pixelFormat: .init(depth: 24),
+										 allocator: nil)
+
+		view = VNCCAFramebufferView(frame: .init(x: 0, y: 0, width: 16, height: 16),
+									framebuffer: framebuffer,
+									connection: connection,
+									connectionDelegate: delegate)
 	}
 
 	func testTheViewAsksTheCurrentLayoutWhatAKeyTypesAtItsShiftAndCapsLock() throws {
@@ -1038,6 +1093,100 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		up(Key.keypad5, "5", ignoring: "5", flags: .numericPad)
 
 		XCTAssertEqual(sent(), [ "down 0xff51", "up 0xff51", "down 0x35", "up 0x35" ])
+	}
+
+	func testAKeyWithAKeysymOfItsOwnHeldAcrossAShiftChangeIsReSent() {
+		// Space held, Shift pressed and let go mid-repeat; the right arrow held while Shift is pressed. Their keysyms are the
+		// same whatever Shift, and a server pressing a held key again at a repeat does so under the Shift it holds then: each
+		// re-sent, never let go of before its own key-up -- a game's jump key, an editor's hand tool.
+		down(Key.space, " ", ignoring: " ")
+		down(Key.space, " ", ignoring: " ", repeat: true)
+		flags(Key.shift, [ .shift, .leftShift ])
+		down(Key.space, " ", ignoring: " ", flags: [ .shift, .leftShift ], repeat: true)
+		flags(Key.shift, [ ])
+		down(Key.space, " ", ignoring: " ", repeat: true)
+		up(Key.space, " ", ignoring: " ")
+
+		XCTAssertEqual(sent(), [ "down 0x20", "down 0x20", "down 0xffe1", "down 0x20", "up 0xffe1", "down 0x20", "up 0x20" ])
+
+		down(Key.rightArrow, "\u{F703}", ignoring: "\u{F703}", flags: [ .numericPad, .function ])
+		flags(Key.shift, [ .shift, .leftShift ])
+		down(Key.rightArrow, "\u{F703}", ignoring: "\u{F703}", flags: [ .numericPad, .function, .shift, .leftShift ], repeat: true)
+		up(Key.rightArrow, "\u{F703}", ignoring: "\u{F703}", flags: [ .numericPad, .function, .shift, .leftShift ])
+		flags(Key.shift, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xff53", "down 0xffe1", "down 0xff53", "up 0xff53", "up 0xffe1" ])
+
+		// Return, F5 and the keypad's + likewise.
+		for (keyCode, characters, keysym) in [ (Key.returnKey, "\r", "0xff0d"), (Key.f5, "\u{F708}", "0xffc2"),
+											   (Key.keypadPlus, "+", "0xffab") ] {
+			down(keyCode, characters, ignoring: characters)
+			flags(Key.shift, [ .shift, .leftShift ])
+			down(keyCode, characters, ignoring: characters, flags: [ .shift, .leftShift ], repeat: true)
+			up(keyCode, characters, ignoring: characters, flags: [ .shift, .leftShift ])
+			flags(Key.shift, [ ])
+
+			XCTAssertEqual(sent(), [ "down \(keysym)", "down 0xffe1", "down \(keysym)", "up \(keysym)", "up 0xffe1" ])
+		}
+	}
+
+	func testTheKeypadsEqualsAndDigitsHeldAcrossAShiftChangeArePressedAnew() {
+		// The keypad's = held, Shift pressed mid-repeat: the Mac types = still, as it types 5 at the keypad's 5. A server whose
+		// keyboard has no keypad = types it as the character '=', by the key that carries it -- '+' under Shift on a US layout
+		// -- and a keypad digit by the number row's -- '%': each let go of and pressed anew, which such a server decides as a
+		// new press, by its keysym.
+		down(Key.keypadEquals, "=", ignoring: "=", flags: .numericPad)
+		flags(Key.shift, [ .shift, .leftShift ])
+		down(Key.keypadEquals, "=", ignoring: "=", flags: [ .numericPad, .shift, .leftShift ], repeat: true)
+		up(Key.keypadEquals, "=", ignoring: "=", flags: [ .numericPad, .shift, .leftShift ])
+		flags(Key.shift, [ ])
+		down(Key.keypad5, "5", ignoring: "5", flags: .numericPad)
+		flags(Key.shift, [ .shift, .leftShift ])
+		down(Key.keypad5, "5", ignoring: "5", flags: [ .numericPad, .shift, .leftShift ], repeat: true)
+		up(Key.keypad5, "5", ignoring: "5", flags: [ .numericPad, .shift, .leftShift ])
+		flags(Key.shift, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffbd", "down 0xffe1", "up 0xffbd", "down 0xffbd", "up 0xffbd", "up 0xffe1",
+								 "down 0x35", "down 0xffe1", "up 0x35", "down 0x35", "up 0x35", "up 0xffe1" ])
+	}
+
+	func testAControlCharacterAtCapsLockGoesAsTheCharacterIgnoringModifiers() {
+		// Apple's Arabic: Caps Lock on, the § key types U+0003, which is no keysym: §, as before.
+		flags(Key.capsLock, .capsLock)
+		down(Key.isoSection, "\u{3}", ignoring: "\u{A7}", flags: .capsLock)
+		up(Key.isoSection, "\u{3}", ignoring: "\u{A7}", flags: .capsLock)
+		flags(Key.capsLock, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xa7", "up 0xa7" ])
+	}
+
+	func testAKeyHeldWhileAnotherViewTakesThisOnesPlaceComesUpAsItWentDown() throws {
+		// Caps Lock on, A held while another view is put on the connection, which the key-up reaches: 'A' let go of, as it went
+		// down -- not 'a', its charactersIgnoringModifiers, which would leave 'A' held on the server.
+		flags(Key.capsLock, .capsLock)
+		down(Key.a, "A", ignoring: "a", flags: .capsLock)
+		try replaceView()
+		up(Key.a, "A", ignoring: "a", flags: .capsLock)
+
+		XCTAssertEqual(sent(), [ "down 0x41", "up 0x41" ])
+
+		// A repeat reaching the new view is a repeat, re-sent; the key-up as above.
+		down(Key.a, "A", ignoring: "a", flags: .capsLock)
+		try replaceView()
+		down(Key.a, "A", ignoring: "a", flags: .capsLock, repeat: true)
+		up(Key.a, "A", ignoring: "a", flags: .capsLock)
+
+		XCTAssertEqual(sent(), [ "down 0x41", "down 0x41", "up 0x41" ])
+
+		// Command-P, Command let go, then the view replaced: P comes up as it went down, p -- a shortcut's
+		// charactersIgnoringModifiers -- not as the capital Caps Lock types now.
+		flags(Key.command, [ .command, .leftCommand, .capsLock ])
+		down(Key.p, "p", ignoring: "p", flags: [ .command, .leftCommand, .capsLock ])
+		flags(Key.command, .capsLock)
+		try replaceView()
+		up(Key.p, "P", ignoring: "p", flags: .capsLock)
+
+		XCTAssertEqual(sent(), [ "down 0xffeb", "down 0x70", "up 0xffeb", "up 0x70" ])
 	}
 }
 #endif

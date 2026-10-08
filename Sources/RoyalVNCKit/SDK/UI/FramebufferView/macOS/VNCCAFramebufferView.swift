@@ -104,10 +104,6 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
     @objc
 	public var lastModifierFlags: NSEvent.ModifierFlags = [ ]
 
-	/// What each held key sent going down (its press, or a repeat that changed it), and under which
-	/// Shift, so that its key-up sends the same.
-	private var heldKeyCodes = HeldKeyCodes()
-
 	/// Whether the last key to go down, modifiers aside, was a dead key, so that the key after it
 	/// goes as it did before (`keyCodesFrom(event:)`).
 	private var lastKeyWasDeadKey = false
@@ -507,20 +503,25 @@ extension VNCCAFramebufferView {
 		}
 	}
 
-	/// A key goes down as what it types now (`keyCodesFrom(event:)`), and is remembered by its
-	/// key code with the event's Shift; an auto-repeat sends what the key types now too, letting go
-	/// of what its press sent first where that, or the Shift it went down under, has changed
-	/// (HeldKeyCodes). A repeat is no new key: it is worked out without the view's dead-key
-	/// bookkeeping, which it leaves as it is.
+	/// A key goes down as what it types now (`keyCodesFrom(event:)`), and is remembered by its key
+	/// code with the connection (its `heldKeyCodes`), so that it comes up as it went down even where
+	/// another view takes this one's place on the connection meanwhile -- and, where Shift is
+	/// significant to the key (`VNCKeyCode.isShiftSignificant(cgKeyCode:)`), with the event's Shift.
+	/// An auto-repeat sends what the key types now too, letting go of what its press sent first where
+	/// that, or the Shift remembered, has changed (HeldKeyCodes). A repeat is no new key: it is worked
+	/// out without the view's dead-key bookkeeping, which it leaves as it is.
 	func handleKeyDown(with event: NSEvent?) {
 		guard let event,
               let connection else {
 			return
 		}
 
-		let keys = heldKeyCodes.keyDown(event.keyCode,
-										isARepeat: event.isARepeat,
-										shift: event.modifierFlags.contains(.shift)) {
+		let shift = event.modifierFlags.contains(.shift)
+			&& VNCKeyCode.isShiftSignificant(cgKeyCode: CGKeyCode(event.keyCode))
+
+		let keys = connection.heldKeyCodes.keyDown(event.keyCode,
+												   isARepeat: event.isARepeat,
+												   shift: shift) {
 			event.isARepeat
 				? VNCKeyCode.keyCodesFrom(event: event,
 										  charactersWithoutDeadKeys: charactersWithoutDeadKeys(event))
@@ -536,15 +537,16 @@ extension VNCCAFramebufferView {
 		}
 	}
 
-	/// A key comes up as exactly what its key-down sent, whatever it would type now; a key this
-	/// view never saw go down, as its `charactersIgnoringModifiers`, as every key-up was before.
+	/// A key comes up as exactly what its key-down sent, whatever it would type now, whichever view
+	/// on the connection saw it go down; a key none did -- held across a reconnect, a new connection
+	/// -- as its `charactersIgnoringModifiers`, as every key-up was before.
 	func handleKeyUp(with event: NSEvent?) {
 		guard let event,
               let connection else {
 			return
 		}
 
-		let keyCodes = heldKeyCodes.keyUp(event.keyCode) {
+		let keyCodes = connection.heldKeyCodes.keyUp(event.keyCode) {
 			keyCodesIgnoringModifiersFrom(event: event)
 		}
 
@@ -594,10 +596,10 @@ extension VNCCAFramebufferView {
 
 	/// What a key event types: its `characters` (Shift and Caps Lock applied) where that is the
 	/// key's own character -- its `charactersIgnoringModifiers`, or what it types at its Shift and
-	/// Caps Lock with no dead key pending (`charactersWithoutDeadKeys`) within Latin-1; or with
-	/// Command, Control or Option held, for a dead key, for the key after one, and where
-	/// `characters` carries a pending dead key or a character beyond Latin-1, its
-	/// `charactersIgnoringModifiers`
+	/// Caps Lock with no dead key pending (`charactersWithoutDeadKeys`) within Latin-1's keysyms; or
+	/// with Command, Control or Option held, for a dead key, for the key after one, and where
+	/// `characters` carries a pending dead key, a character beyond Latin-1 or a control character,
+	/// its `charactersIgnoringModifiers`
 	/// (`VNCKeyCode.keyCodesFrom(cgKeyCode:characters:charactersIgnoringModifiers:charactersWithoutDeadKeys:modifierFlags:completingDeadKey:)`).
 	/// Every key but a modifier says whether it is a dead key, for the key after it.
 	func keyCodesFrom(event: NSEvent) -> [VNCKeyCode] {

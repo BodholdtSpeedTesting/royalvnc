@@ -1232,3 +1232,177 @@ struct FuzzGenerator {
 		}
 	}
 }
+
+// MARK: - Seeds
+
+/// The streams the regression tests send -- ConfirmedTrapTests, HostileServerTests,
+/// FuzzFindingTests -- as fuzz inputs of each family, for libFuzzer to start from alongside the
+/// generators'; and Apple Remote Desktop's parameters, which Tools/fuzz's "ard" family reads.
+enum FuzzSeeds {
+	static func regressions(for family: FuzzFamily) -> [FuzzInput] {
+		func input(depth: UInt8 = 24, width: UInt16, height: UInt16, _ records: [FuzzInput.Record]) -> FuzzInput {
+			.init(depth: depth, width: width, height: height, chunkLimit: .max, records: records)
+		}
+
+		func payload(_ build: (inout ServerStream) -> Void) -> [UInt8] {
+			var stream = ServerStream()
+			build(&stream)
+
+			return stream.bytes
+		}
+
+		func zlibPayload(_ inflated: [UInt8]) -> [UInt8] {
+			var zlib = ZlibStoredStream()
+			let chunk = zlib.chunk(inflated)
+
+			return payload { $0.u32(UInt32(chunk.count)); $0.append(chunk) }
+		}
+
+		switch family.name {
+			case "raw-copyrect":
+				return [
+					input(width: 8, height: 8, [
+						.rectangle(encoding: 0, x: 0, y: 0, width: 2, height: 2, payload: [UInt8](repeating: 0x7f, count: 16)),
+						.rectangle(encoding: 1, x: 4, y: 4, width: 2, height: 2, payload: payload { $0.u16(0); $0.u16(0) })
+					])
+				]
+			case "rre-corre":
+				return [
+					// ConfirmedTrapTests: a sub-rectangle at x 0xFFFF in a rectangle at x 1.
+					input(width: 100, height: 100, [
+						.rectangle(encoding: 2, x: 1, y: 0, width: 1, height: 1, payload: payload {
+							$0.u32(1); $0.pixel(0, bytesPerPixel: 4); $0.pixel(0xffffff, bytesPerPixel: 4)
+							$0.u16(0xffff); $0.u16(0); $0.u16(1); $0.u16(1)
+						})
+					]),
+					// HostileServerTests: CoRRE at the edge of a 65535-pixel framebuffer.
+					input(width: 65535, height: 1, [
+						.rectangle(encoding: 4, x: 65400, y: 0, width: 135, height: 1, payload: payload {
+							$0.u32(1); $0.pixel(0, bytesPerPixel: 4); $0.pixel(0xffffff, bytesPerPixel: 4)
+							$0.u8(255); $0.u8(0); $0.u8(1); $0.u8(1)
+						})
+					])
+				]
+			case "hextile":
+				return [
+					// HostileServerTests: a 3-pixel last tile at a 65535-pixel framebuffer's edge, and
+					// a subrectangle at x 15 of it.
+					input(width: 65535, height: 16, [
+						.rectangle(encoding: 5, x: 65500, y: 0, width: 35, height: 1, payload: payload {
+							$0.u8(2); $0.pixel(0x101010, bytesPerPixel: 4); $0.u8(0)
+							$0.u8(4 | 8); $0.pixel(0xf0f0f0, bytesPerPixel: 4); $0.u8(1); $0.u8(15 << 4); $0.u8(0)
+						})
+					])
+				]
+			case "zlib":
+				return [
+					input(width: 8, height: 8, [
+						.rectangle(encoding: 6, x: 0, y: 0, width: 2, height: 2, payload: zlibPayload([UInt8](repeating: 0x40, count: 16)))
+					])
+				]
+			case "zrle":
+				return [
+					// HostileServerTests: a tile ending at a 65535-pixel framebuffer's edge.
+					input(width: 65535, height: 1, [
+						.rectangle(encoding: 16, x: 65472, y: 0, width: 63, height: 1, payload: zlibPayload([1, 0xcc, 0xbb, 0xaa]))
+					]),
+					// HostileServerTests: a packed palette index of 3 in a palette of three.
+					input(width: 8, height: 1, [
+						.rectangle(encoding: 16, x: 0, y: 0, width: 4, height: 1,
+								   payload: zlibPayload([3, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0b00_01_10_11]))
+					])
+				]
+			case "tight":
+				return [
+					input(width: 16, height: 16, [
+						.rectangle(encoding: 7, x: 0, y: 0, width: 8, height: 8, payload: [0x80, 0x11, 0x22, 0x33]),
+						// FuzzFindingTests: a JPEG that cannot be read.
+						.rectangle(encoding: 7, x: 0, y: 0, width: 8, height: 8, payload: [0x90, 7, 0xff, 0xd8, 0xff, 0xc0, 0x00, 0x03, 0x01])
+					])
+				]
+			case "pseudo":
+				return [
+					input(width: 32, height: 32, [
+						.rectangle(encoding: -223, x: 0, y: 0, width: 61440, height: 4320, payload: []),
+						.rectangle(encoding: -223, x: 0, y: 0, width: 65535, height: 65535, payload: [])
+					]),
+					input(width: 32, height: 32, [
+						.rectangle(encoding: -308, x: 0, y: 0, width: 65535, height: 65535, payload: payload {
+							$0.u8(1); $0.append([0, 0, 0]); $0.u32(7); $0.u16(0); $0.u16(0); $0.u16(65535); $0.u16(65535); $0.u32(0)
+						}),
+						.rectangle(encoding: -239, x: 1, y: 1, width: 2, height: 2, payload: [UInt8](repeating: 0xff, count: 18))
+					])
+				]
+			case "messages":
+				return [
+					// ConfirmedTrapTests: one colour at entry 300, in an 8-bit session.
+					input(depth: 8, width: 4, height: 4, [
+						.message(payload { $0.u8(1); $0.setColourMapEntries(firstColour: 300, colours: [(0xffff, 0, 0)]) })
+					]),
+					// FuzzFindingTests: a ServerCutText of length 0x80000000.
+					input(width: 4, height: 4, [
+						.message(payload { $0.u8(3); $0.append([0, 0, 0]); $0.u32(0x8000_0000); $0.append(Array("hello".utf8)) })
+					])
+				]
+			default:
+				return []
+		}
+	}
+
+	/// rfbproto.rst, Diffie-Hellman Authentication (lines 1336-1374): generator, key-size, prime,
+	/// public value. RFC 2409's First and Second Oakley Groups, 768 and 1,024 bits, generator 2,
+	/// each with a public value inside it; and the degenerate parameters HostileServerTests
+	/// refuses: primes of one and zero, a key size of one.
+	static var ard: [[UInt8]] {
+		func parameters(generator: UInt16, prime: [UInt8], publicValue: [UInt8]) -> [UInt8] {
+			var stream = ServerStream()
+			stream.u16(generator)
+			stream.u16(UInt16(prime.count))
+			stream.append(prime)
+			stream.append(publicValue)
+
+			return stream.bytes
+		}
+
+		var group1Value = oakleyGroup1Prime
+		group1Value[0] = 0x12
+		var group2Value = oakleyGroup2Prime
+		group2Value[0] = 0x12
+
+		let zeros = [UInt8](repeating: 0, count: 127)
+
+		return [
+			parameters(generator: 2, prime: oakleyGroup1Prime, publicValue: group1Value),
+			parameters(generator: 2, prime: oakleyGroup2Prime, publicValue: group2Value),
+			parameters(generator: 2, prime: zeros + [1], publicValue: zeros + [2]),
+			parameters(generator: 2, prime: zeros + [0], publicValue: zeros + [2]),
+			parameters(generator: 2, prime: [1], publicValue: [1])
+		]
+	}
+
+	/// RFC 2409 6.1, the First Oakley Default Group: 768 bits.
+	static let oakleyGroup1Prime = hex("""
+		FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+		29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+		EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+		E485B576 625E7EC6 F44C42E9 A63A3620 FFFFFFFF FFFFFFFF
+		""")
+
+	/// RFC 2409 6.2, the Second Oakley Group: 1,024 bits.
+	static let oakleyGroup2Prime = hex("""
+		FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+		29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+		EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+		E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
+		EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE65381
+		FFFFFFFF FFFFFFFF
+		""")
+
+	private static func hex(_ text: String) -> [UInt8] {
+		let digits = Array(text.filter(\.isHexDigit))
+
+		return stride(from: 0, to: digits.count - 1, by: 2).map {
+			UInt8(String(digits[$0...$0 + 1]), radix: 16)!
+		}
+	}
+}

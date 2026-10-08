@@ -1,0 +1,70 @@
+# libFuzzer dictionary for server-to-client-fuzz: numbers a hostile server would try, and the
+# markers of the layouts the decoders read (RFC 6143 7.6-7.8; rfbproto.rst's Encodings).
+
+# U16 edges: positions, sizes, colour map entries, the ceiling's sides
+"\x00\x00"
+"\x00\x01"
+"\x00\x0f"
+"\x00\x10"
+"\x00\x3f"
+"\x00\x40"
+"\x00\xff"
+"\x01\x00"
+"\x01\x2c"
+"\x40\x00"
+"\x40\x01"
+"\x7f\xff"
+"\x80\x00"
+"\xff\xc0"
+"\xff\xef"
+"\xff\xfe"
+"\xff\xff"
+
+# U32 edges: counts and lengths
+"\x00\x00\x00\x00"
+"\x00\x00\x00\x01"
+"\x00\x01\x00\x00"
+"\x01\x00\x00\x00"
+"\x01\x00\x00\x01"
+"\x7f\xff\xff\xff"
+"\x80\x00\x00\x00"
+"\xff\xff\xff\xfe"
+"\xff\xff\xff\xff"
+
+# zlib: a header (RFC 1950), a stored block's header (RFC 1951 3.2.4)
+"\x78\x01"
+"\x78\x9c"
+"\x00\x04\x00\xfb\xff"
+"\x01\x00\x00\xff\xff"
+
+# Hextile subencoding masks; ZRLE subencodings; Tight compression control
+"\x01"
+"\x0e"
+"\x1a"
+"\x1f"
+"\x10"
+"\x7f"
+"\x80"
+"\x81"
+"\x82"
+"\x90"
+"\xa0"
+"\x40"
+
+# JPEG markers
+"\xff\xd8"
+"\xff\xd9"
+"\xff\xc0"
+"\xff\xda"
+
+# Message types: FramebufferUpdate, SetColourMapEntries, Bell, ServerCutText, EndOfContinuousUpdates
+"\x00\x00"
+"\x01\x00"
+"\x02"
+"\x03\x00\x00\x00"
+"\x96"
+
+# Extended clipboard flags: caps with text, provide, notify
+"\x01\x00\x00\x01"
+"\x10\x00\x00\x00"
+"\x08\x00\x00\x00"

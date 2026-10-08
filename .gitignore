@@ -47,6 +47,8 @@ playground.xcworkspace
 # .swiftpm
 
 .build/
+# Tools/fuzz/build.sh's scratch build
+.build-fuzz/
 
 # CocoaPods
 #

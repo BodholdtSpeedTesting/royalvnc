@@ -424,6 +424,35 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertEqual(session.pixel(65534, 0), 0xaa_bb_cc)
 		XCTAssertEqual(session.pixel(65471, 0), 0, "drawn outside the rectangle")
 	}
+
+	// MARK: - ZRLE: a packed palette index inside its palette (7.7.5)
+
+	/// "each pixel represented as a bit field yielding a zero-based index into the palette": a
+	/// palette of three takes a 2-bit field, which can also say 3. Copying entry 3 of three read
+	/// past the palette, and trapped -- in a 24-bit session with ZRLE, the app's own.
+	func testZRLEPackedPaletteIndexPastItsPaletteIsRefused() async throws {
+		let session = try TestSession(width: 8, height: 1, depth: 24)
+
+		do {
+			try await session.receiveZRLE(width: 4, height: 1, tiles: [
+				3, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0b00_01_10_11
+			])
+
+			XCTFail("palette index 3 of a palette of three was accepted")
+		} catch {
+			assertServerRefused(error, naming: "palette")
+		}
+	}
+
+	func testZRLEPackedPaletteTileDecodesAsBefore() async throws {
+		let session = try TestSession(width: 8, height: 1, depth: 24)
+
+		try await session.receiveZRLE(width: 4, height: 1, tiles: [
+			3, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x33, 0x33, 0x33, 0b00_01_10_10
+		])
+
+		XCTAssertEqual((0..<5).map { session.pixel($0, 0) }, [0x11_11_11, 0x22_22_22, 0x33_33_33, 0x33_33_33, 0])
+	}
 }
 
 // MARK: - A session's worth of decoding, without a connection
@@ -480,6 +509,22 @@ final class TestSession {
 
 		try await receiveFramebufferUpdate(stream)
 	}
+
+	/// A ZRLE rectangle at the origin whose zlib data inflates to `tiles`, on the session's one
+	/// ZRLE stream.
+	func receiveZRLE(width: UInt16, height: UInt16, tiles: [UInt8]) async throws {
+		let chunk = zrleStream.chunk(tiles)
+
+		var stream = ServerStream()
+		stream.framebufferUpdateHeader(rectangles: 1)
+		stream.rectangle(x: 0, y: 0, width: width, height: height, encoding: 16)
+		stream.u32(UInt32(chunk.count))
+		stream.append(chunk)
+
+		try await receiveFramebufferUpdate(stream)
+	}
+
+	private var zrleStream = ZlibStoredStream()
 
 	/// The pixel drawn at x, y, as 0xRRGGBB.
 	func pixel(_ x: Int, _ y: Int) -> UInt32 {

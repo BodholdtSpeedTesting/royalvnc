@@ -247,6 +247,17 @@ private extension VNCProtocol.ZRLEEncoding {
 
 					let indexInPalette = (Int(encoded) >> shift) & mask
 
+					// RFC 6143 7.7.5 (and so 7.7.6): each packed pixel is "a bit field yielding a
+					// zero-based index into the palette" of paletteSize pixels. A 2-bit field can
+					// say 3 to a palette of 3, a 4-bit one 15 to a palette of 5; copying that
+					// entry read past the palette, and trapped. It is a server breaking the
+					// protocol, refused as a palette RLE tile's index past its palette is: the
+					// session ends with the error.
+					guard indexInPalette < Int(paletteSize) else {
+						throw VNCError.protocol(.zrlePaletteIndexOverflow(paletteIndex: indexInPalette,
+																		  paletteSize: paletteSize))
+					}
+
 					let sourceStartIndex = indexInPalette * 4
 
 					guard let target = tileBufferPtr.baseAddress?.advanced(by: offset).assumingMemoryBound(to: UInt8.self) else {

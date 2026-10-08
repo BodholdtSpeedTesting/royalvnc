@@ -786,6 +786,35 @@ final class HostileServerTests: XCTestCase {
 
 		try await receiveARD(generator: 0xfffd, keySize: 64, prime: narrowPrime, publicValue: small(2, size: 64))
 	}
+
+	/// A prime with a leading zero byte -- noVNC's test of this security type sends one, 128 bytes
+	/// counting up from 0 -- makes every private key and public value below it a byte shorter than
+	/// the key size. The kit refused its own keys for that and failed before sending anything; the
+	/// public value now goes as key-size bytes, padded, as rfbproto.rst has the client send it.
+	func testARDPublicValueShorterThanTheKeySizeIsSentPadded() throws {
+		let prime = Data((0..<128).map { UInt8($0) })
+		var peerKey = [UInt8](prime)
+		peerKey[127] = 0x05
+
+		guard let agreement = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement(prime: prime,
+																					   generator: Data([0x7f, 0xff]),
+																					   peerKey: Data(peerKey),
+																					   keyLength: 128) else {
+			XCTFail("the key agreement was refused")
+
+			return
+		}
+
+		XCTAssertEqual(agreement.publicKey.count, 128)
+		XCTAssertEqual(agreement.publicKey.first, 0, "a value below this prime takes at most 127 bytes")
+
+		let authentication = VNCProtocol.ARDAuthentication.Authentication(agreement: agreement,
+																		  username: "user",
+																		  password: "password")
+
+		XCTAssertEqual(authentication?.publicKey.count, 128)
+		XCTAssertEqual(authentication?.cipherText.count, 128)
+	}
 }
 
 /// "FFFF 0001 ..." as bytes.

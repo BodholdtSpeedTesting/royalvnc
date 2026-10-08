@@ -75,18 +75,22 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 			return nil
 		}
 
-		// Check key lengths of generated private and public DH keys
-		guard bigPrivKey.bytesCount == keyLength,
-			  bigPubKey.bytesCount == keyLength else {
-			return nil
-		}
-
+		// rfbproto.rst, Diffie-Hellman Authentication (lines 1336-1374): the client sends its public
+		// value as key-size bytes. A value below the prime can need fewer -- one in 256 has a leading
+		// zero byte, and every one does where the prime itself has one -- so it is sent padded to
+		// key-size, as noVNC sends it. Both keys used to be refused unless they took exactly
+		// key-size bytes, the private key too, which is never sent: about one key agreement in 128
+		// failed, and the connection with it, before anything was sent. A public value of zero, or
+		// one that cannot fit, is still refused.
 		guard let privKey = bigPrivKey.bigEndianData(),
-			  let pubKey = bigPubKey.bigEndianData() else {
+			  let pubKey = bigPubKey.bigEndianData(),
+			  !privKey.isEmpty,
+			  !pubKey.isEmpty,
+			  pubKey.count <= keyLength else {
 			return nil
 		}
 
-		let keyPair = KeyPair(publicKey: pubKey,
+		let keyPair = KeyPair(publicKey: Data(count: keyLength - pubKey.count) + pubKey,
 							  privateKey: privKey)
 
 		return keyPair

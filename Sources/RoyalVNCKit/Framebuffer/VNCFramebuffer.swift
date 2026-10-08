@@ -650,12 +650,20 @@ private extension VNCFramebuffer {
 		let destinationPixelData: Data
 
 		if !needsColorConversion { // Fast Path
-			destinationPixelData = .init([
-				pixelData[0],
-				pixelData[1],
-				pixelData[2],
-				fixedAlpha
-			])
+			// Through its bytes rather than by index: a pixel that is a slice of a larger Data
+			// starts at the slice's own index, not at 0, and pixelData[0] trapped. The guard above
+			// has made sure there are bytesPerPixel of them, four here. The closure's type is
+			// spelled out: away from Apple's platforms Data (FoundationEssentials) also has a
+			// deprecated withUnsafeBytes taking a typed pointer, and the one meant is ambiguous
+			// there without it.
+			destinationPixelData = pixelData.withUnsafeBytes { (pixelBytes: UnsafeRawBufferPointer) -> Data in
+				Data([
+					pixelBytes[0],
+					pixelBytes[1],
+					pixelBytes[2],
+					fixedAlpha
+				])
+			}
 		} else { // Slow Path
 			destinationPixelData = pixelData.withUnsafeBytes { sourcePixelDataPtr in
 				let destinationPixel = destinationPixelWith(sourcePixelData: sourcePixelDataPtr,

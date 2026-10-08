@@ -490,6 +490,25 @@ final class HostileServerTests: XCTestCase {
 		}
 	}
 
+	/// A pixel that is a slice of a larger Data -- its first byte at index 1 -- filled in a 24-bit
+	/// session, whose fill copies the pixel's bytes without converting them. The kit read them as
+	/// pixelData[0], [1] and [2], and index 0 is not the slice's: it trapped. No decoder hands
+	/// fill such a slice today (ZRLE's are slices from 0), so this was a trap waiting for one.
+	func testFillWithAPixelThatIsASliceDrawsIt() throws {
+		let framebuffer = try makeTestFramebuffer(width: 4, height: 4, depth: 24)
+		let backing = Data([0xee, 0x33, 0x22, 0x11, 0x00, 0xee])
+		var pixel = backing[1..<5]
+
+		XCTAssertEqual(pixel.startIndex, 1)
+
+		framebuffer.fill(region: .init(x: 1, y: 1, width: 1, height: 1), withPixel: &pixel)
+
+		let bytes = framebuffer.surfaceAddress.assumingMemoryBound(to: UInt8.self)
+		let offset = (1 * 4 + 1) * 4
+
+		XCTAssertEqual([bytes[offset], bytes[offset + 1], bytes[offset + 2]], [0x33, 0x22, 0x11])
+	}
+
 	/// The same for `update`, whose rows are copied out of the data with no check of their own.
 	func testUpdateWithFewerBytesThanItsRegionDrawsNothing() throws {
 		let logger = QuietLogger()

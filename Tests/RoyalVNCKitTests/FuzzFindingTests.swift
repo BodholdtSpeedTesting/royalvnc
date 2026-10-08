@@ -5,6 +5,37 @@ import XCTest
 @testable import RoyalVNCKit
 
 final class FuzzFindingTests: XCTestCase {
+	// MARK: - Tight's JPEG (rfbproto.rst, Tight Encoding)
+
+	/// A JPEG that cannot be read. Away from Apple's platforms swift-jpeg decodes it, and its own
+	/// error -- a LexingError -- reached the embedder as it was, where every other decoder's is a
+	/// VNCError with something to show. Found by the seeded fuzz on Linux, 220 sessions of 32,000.
+	func testTightJPEGThatCannotBeReadIsRefusedWithTheKitsError() async throws {
+		for jpeg: [UInt8] in [
+			[0xff, 0xd8, 0xff, 0xc0, 0x00, 0x03, 0x01],
+			[0xff, 0xd8, 0x00, 0x01, 0x02, 0x03, 0xff, 0xd9],
+			[0xff, 0xd8, 0xff, 0xda, 0x00, 0x02, 0xff, 0xd9],
+			[0x00]
+		] {
+			let session = try TestSession(width: 16, height: 16, depth: 24)
+
+			var stream = ServerStream()
+			stream.framebufferUpdateHeader(rectangles: 1)
+			stream.rectangle(x: 0, y: 0, width: 8, height: 8, encoding: 7)
+			stream.u8(0x90) // JpegCompression
+			stream.u8(UInt8(jpeg.count)) // a compact length of one byte
+			stream.append(jpeg)
+
+			do {
+				try await session.receiveFramebufferUpdate(stream)
+
+				XCTFail("\(jpeg) was drawn as a JPEG")
+			} catch {
+				XCTAssertTrue(error is VNCError, "\(jpeg): \(type(of: error)) \(error)")
+			}
+		}
+	}
+
 	// MARK: - ServerCutText (RFC 6143 7.6.4; rfbproto.rst's extended form)
 
 	private func receiveCutText(_ stream: ServerStream) async throws -> (VNCProtocol.ServerCutText, remaining: Int) {

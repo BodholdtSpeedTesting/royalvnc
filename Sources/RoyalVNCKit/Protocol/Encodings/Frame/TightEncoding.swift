@@ -137,14 +137,26 @@ extension VNCProtocol.TightEncoding {
             
 //            logger.logDebug("Decoding Tight JPEG Sub-Encoding image data")
 
-            var decoded = try Self.decodeImageData(
-                jpegData,
-                imageType: .jpeg,
-                width: width,
-                height: height,
-                pixelFormat: pixelFormat,
-                bytesPerPixel: bytesPerPixel
-            )
+            // A JPEG that cannot be read ends the session with the error, as compressed data that
+            // cannot be inflated does: a server sending one breaks the protocol. Away from Apple's
+            // platforms the decoder is swift-jpeg, whose own errors used to reach the embedder as
+            // they were -- a LexingError, not a VNCError with something to show.
+            var decoded: Data
+
+            do {
+                decoded = try Self.decodeImageData(
+                    jpegData,
+                    imageType: .jpeg,
+                    width: width,
+                    height: height,
+                    pixelFormat: pixelFormat,
+                    bytesPerPixel: bytesPerPixel
+                )
+            } catch let error as VNCError {
+                throw error
+            } catch {
+                throw VNCError.protocol(.frameDecode(encodingType: encodingType, underlyingError: error))
+            }
 
             framebuffer.update(region: rectangle.region,
                                data: &decoded)

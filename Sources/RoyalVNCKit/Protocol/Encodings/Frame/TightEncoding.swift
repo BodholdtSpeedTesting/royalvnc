@@ -964,7 +964,10 @@ private extension VNCProtocol.TightEncoding {
     ///   is the rectangle's height already, and a DNL would make the image taller again;
     /// - every scan is decoded with `extend: false`, so that entropy-coded data holding more
     ///   lines than Y is not decoded as more of the image, as swift-jpeg's own decompress allows
-    ///   for a first scan.
+    ///   for a first scan. Every one of the frame's lines is asked for, too: a scan whose data
+    ///   ends before the frame's last block ends with swift-jpeg's truncatedEntropyCodedSegment,
+    ///   where its own decompress stopped a first scan quietly at the end of a row of blocks and
+    ///   drew the rows after it mid-grey. (ImageIO, on Apple's platforms, draws such a JPEG.)
     /// Otherwise the segments are taken in the order and the way swift-jpeg's own decompress takes
     /// them. What is refused here is refused as invalidData; swift-jpeg's own errors are left to
     /// the caller, which ends the session with them as frameDecode.

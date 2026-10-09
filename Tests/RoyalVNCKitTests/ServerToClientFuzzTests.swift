@@ -27,10 +27,14 @@
 //   FUZZ_SEED=31 FUZZ_SESSIONS=100000 swift test --filter ServerToClientFuzzTests
 // and the same with `-c release -Xswiftc -enable-testing`, which is the build people run: some of
 // what this found was compiled into debug builds only. More sessions from one seed rather than
-// more seeds: FRng starts seed n one draw past seed n - 1, and two seeds' sessions fall into step
-// -- seed 5's from its session 1,157 on, seed 2's from its 9,147 -- after which they repeat each
-// other's. Tools/fuzz runs the same generators as seeds for libFuzzer, coverage-guided and under
-// AddressSanitizer.
+// more seeds: FRng starts seed n one draw past seed n - 1, so every seed draws the same numbers as
+// every other, a few draws apart, and once a session of one starts where a session of another
+// does, the two repeat each other's sessions from there. A session is decided by the generator's
+// state at its start; counting those, seeds 1 and 4 run in step from seed 1's session 8 (seed 4's
+// 13), 1 and 3 from its 666 (316), and all of seeds 1 to 6 by its 9,787, so that 24,321 of their
+// 60,000 sessions at 10,000 a seed are distinct. At the defaults, 1,200 of 1,200 are at 400 a seed
+// and 2,666 of 3,000 at 1,000. Tools/fuzz runs the same generators as seeds for libFuzzer,
+// coverage-guided and under AddressSanitizer.
 
 import XCTest
 import Foundation

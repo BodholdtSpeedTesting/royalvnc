@@ -249,6 +249,31 @@ final class FuzzFindingTests: XCTestCase {
 		}
 	}
 
+	/// A scan whose data ends before its frame's last block. swift-jpeg's one-call decompress
+	/// stopped a first scan quietly where its data ran out at the end of a row of blocks, and drew
+	/// the rows it had no data for mid-grey. Decoding the frame's lines and no more, the kit asks
+	/// for every one of them, and swift-jpeg's truncatedEntropyCodedSegment ends the session as
+	/// frameDecode, as data ending inside a row of blocks always did: a 16 x 16 frame whose scan
+	/// holds one row of its two, and one whose scan holds no data. ImageIO, on Apple's platforms,
+	/// draws both.
+	func testTightJPEGScanEndingBeforeItsFramesLastBlockIsRefused() async throws {
+		try skipWhereImageIODecodesJPEGs()
+
+		for (label, scan) in [("one row of blocks of two", Self.blocks(2)), ("no data", [UInt8]())] {
+			let session = try TestSession(width: 32, height: 32, depth: 24)
+			let update = Self.tightJPEGUpdate(width: 16, height: 16, jpeg: Self.jpeg(width: 16, height: 16, scan: scan))
+
+			do {
+				try await session.receiveFramebufferUpdate(update)
+
+				XCTFail("a 16 x 16 frame whose scan holds \(label): drawn")
+			} catch {
+				assertServerRefused(error, naming: "frameDecode")
+				XCTAssertTrue("\(error)".contains("truncatedEntropyCodedSegment"), "\(label): \(error)")
+			}
+		}
+	}
+
 	/// JPEGs of their rectangle's size, their entropy-coded data padded as T.81 has it, decode as
 	/// before: one and three components, sizes that are and are not whole blocks, a progressive
 	/// one (G.1.1.1.1, a DC scan alone), and restart intervals (B.2.4.4) -- their RSTm markers in

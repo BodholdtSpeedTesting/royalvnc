@@ -38,6 +38,86 @@ final class FuzzFindingTests: XCTestCase {
 		}
 	}
 
+	/// Images that are not JPEGs, sent as a Tight rectangle's JpegCompression, whose data is a
+	/// JPEG (rfbproto.rst, lines 3505-3533: "The *jpeg-data* is a JFIF stream"): one 8 x 8 image as
+	/// ImageIO writes it as a PNG, a TIFF and a GIF. On Apple's platforms ImageIO picked its decoder
+	/// by what the bytes look like and drew each of them -- and OpenEXR, HEIC, PSD, TGA and more --
+	/// where swift-jpeg, elsewhere, reads nothing but JPEGs. None is drawn now, on any platform:
+	/// where ImageIO decodes, bytes that do not begin with SOI and another marker (ITU-T T.81
+	/// B.1.1.2, B.2.1) are refused as invalidData before ImageIO sees them, and so is anything
+	/// ImageIO does not take for a JPEG; elsewhere swift-jpeg's error ends the session as
+	/// frameDecode, as before. A JPEG of the same size is still drawn, on every platform. Found in
+	/// review round 3.
+	///
+	/// On every input tried, each of the two checks refuses whatever the other does, so this pins
+	/// the two together: with either one alone it still passes.
+	func testTightRectangleWhoseJPEGIsAnotherFormatIsNotDrawn() async throws {
+		let png = hexBytes("""
+			89504e47 0d0a1a0a 0000000d 49484452 00000008 00000008 08020000 004b6d29
+			dc000000 01735247 4200aece 1ce90000 00386558 49664d4d 002a0000 00080001
+			87690004 00000001 0000001a 00000000 0002a002 00040000 00010000 0008a003
+			00040000 00010000 00080000 0000b64c 59680000 00184944 4154081d 63fcffbf
+			e1010303 26620189 61038353 0200cc8b 0edca373 fdd60000 00004945 4e44ae42
+			6082
+			""")
+
+		let tiff = hexBytes("""
+			4d4d002a 000000c8 ffff80df ff80bfff 809fff80 7fff805f ff803fff 801fff80
+			ffdf80df df80bfdf 809fdf80 7fdf805f df803fdf 801fdf80 ffbf80df bf80bfbf
+			809fbf80 7fbf805f bf803fbf 801fbf80 ff9f80df 9f80bf9f 809f9f80 7f9f805f
+			9f803f9f 801f9f80 ff7f80df 7f80bf7f 809f7f80 7f7f805f 7f803f7f 801f7f80
+			ff5f80df 5f80bf5f 809f5f80 7f5f805f 5f803f5f 801f5f80 ff3f80df 3f80bf3f
+			809f3f80 7f3f805f 3f803f3f 801f3f80 ff1f80df 1f80bf1f 809f1f80 7f1f805f
+			1f803f1f 801f1f80 000e0100 00030000 00010008 00000101 00030000 00010008
+			00000102 00030000 00030000 01760103 00030000 00010001 00000106 00030000
+			00010002 0000010a 00030000 00010001 00000111 00040000 00010000 00080112
+			00030000 00010001 00000115 00030000 00010003 00000116 00030000 00010008
+			00000117 00040000 00010000 00c0011c 00030000 00010001 00000128 00030000
+			00010002 00000153 00030000 00030000 017c0000 00000008 00080008 00010001
+			0001
+			""")
+
+		let gif = hexBytes("""
+			47494638 37610800 0800e600 00000000 1f1f803f 1f805f1f 807f1f80 9f1f80bf
+			1f80df1f 80ff1f80 1f3f803f 3f805f3f 807f3f80 9f3f80bf 3f80df3f 80ff3f80
+			1f5f803f 5f805f5f 807f5f80 9f5f80bf 5f80df5f 80ff5f80 1f7f803f 7f805f7f
+			807f7f80 9f7f80bf 7f80df7f 80ff7f80 1f9f803f 9f805f9f 807f9f80 9f9f80bf
+			9f80df9f 80ff9f80 1fbf803f bf805fbf 807fbf80 9fbf80bf bf80dfbf 80ffbf80
+			1fdf803f df805fdf 807fdf80 9fdf80bf df80dfdf 80ffdf80 1fff803f ff805fff
+			807fff80 9fff80bf ff80dfff 80ffff80 ffffff00 00000000 00000000 00000000
+			00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+			00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+			00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+			00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+			00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+			00000000 00000000 00000000 0021f904 04000000 002c0000 00000800 08000007
+			4280403f 3e3d3c3b 3a393837 36353433 3231302f 2e2d2c2b 2a292827 26252423
+			2221201f 1e1d1c1b 1a191817 16151413 1211100f 0e0d0c0b 0a090807 06050403
+			02018100 3b
+			""")
+
+		XCTAssertEqual([png.count, tiff.count, gif.count], [162, 386, 485])
+
+		for (format, image) in [("PNG", png), ("TIFF", tiff), ("GIF", gif)] {
+			let session = try TestSession(width: 8, height: 8, depth: 24)
+
+			do {
+				try await session.receiveFramebufferUpdate(Self.tightJPEGUpdate(width: 8, height: 8, jpeg: image))
+
+				XCTFail("a \(format) sent as a Tight JPEG was drawn")
+			} catch {
+#if canImport(ImageIO) && canImport(CoreGraphics)
+				assertServerRefused(error, naming: "invalidData")
+#else
+				assertServerRefused(error, naming: "frameDecode")
+#endif
+			}
+		}
+
+		await assertDrawnMidGrey(width: 8, height: 8, jpeg: Self.jpeg(width: 8, height: 8, scan: Self.blocks(1)),
+								 label: "an 8 x 8 JPEG")
+	}
+
 	// MARK: - Tight's JPEG is the rectangle's size (rfbproto.rst, Tight Encoding; ITU-T T.81)
 
 	/// A baseline JPEG (ITU-T T.81) whose frame header (B.2.2) declares `width` x `height`: a

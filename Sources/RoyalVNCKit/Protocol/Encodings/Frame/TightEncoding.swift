@@ -738,9 +738,24 @@ private extension VNCProtocol.TightEncoding {
         bytesPerPixel: Int
     ) throws -> Data {
 #if canImport(ImageIO) && canImport(CoreGraphics)
+        // rfbproto.rst's JpegCompression (lines 3505-3533) is a JPEG ("The *jpeg-data* is a JFIF
+        // stream", line 3533), and a JPEG begins with its SOI marker and then another marker, each
+        // marker an X'FF' byte and a code (ITU-T T.81 B.1.1.2, B.2.1). ImageIO picks its decoder by
+        // what the bytes look like, not by what they were sent as: a PNG, a TIFF, a GIF, OpenEXR,
+        // HEIC and more, sent as a Tight JPEG, were drawn. So bytes that do not begin as a JPEG
+        // are refused before ImageIO sees them, and what ImageIO takes the rest for must be a JPEG
+        // too ("public.jpeg", the uniform type identifier CGImageSourceGetType reports for one).
+        // Away from Apple's platforms swift-jpeg reads nothing but JPEGs already. (PngCompression
+        // never reaches here: decodeRectangle refuses it first.)
+        guard imageType == .jpeg,
+              data.starts(with: [0xff, 0xd8, 0xff]) else {
+            throw VNCError.protocol(.invalidData)
+        }
+
         let cfData = data as CFData
 
         guard let imageSource = CGImageSourceCreateWithData(cfData, nil),
+              CGImageSourceGetType(imageSource) as String? == "public.jpeg",
               let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
             throw VNCError.protocol(.invalidData)
         }

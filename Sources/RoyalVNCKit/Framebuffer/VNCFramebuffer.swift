@@ -767,10 +767,64 @@ private extension VNCFramebuffer {
 			return
 		}
 
-		var data = bufferData(ofRegion: sourceRegion)
+		// RFC 6143 7.7.2: CopyRect copies the framebuffer's own pixels. They are copied as the
+		// surface holds them, four bytes of BGRA each, a row at a time. They went through
+		// updatePixelBufferWithData, which reads pixels in the format the server sends: at 24 bits
+		// that is the same four bytes, but at 16 and 8 bits each surface pixel's bytes were read
+		// as two or four of the server's pixels and converted, and the copy drawn in the wrong
+		// colours. bufferData copies the source out first, so a source and destination that
+		// overlap -- a scroll -- copy as they did.
+		guard sourceRegion.size == destinationRegion.size else {
+			logger.logError("Copy of a \(sourceRegion.size) region to a \(destinationRegion.size) one; nothing drawn")
 
-		updatePixelBufferWithData(&data,
-								  forRegion: destinationRegion)
+			return
+		}
+
+		let data = bufferData(ofRegion: sourceRegion)
+
+		let bytesPerPixel = destinationProperties.bytesPerPixel
+		let regionWidth = Int(destinationRegion.size.width)
+		let regionHeight = Int(destinationRegion.size.height)
+		let regionX = Int(destinationRegion.location.x)
+		let regionY = Int(destinationRegion.location.y)
+		let rowLength = regionWidth * bytesPerPixel
+
+		let fixedAlpha = UInt8(destinationProperties.alphaMax)
+		let alphaOffset = bytesPerPixel - 1
+
+		let frameBufferWidth = width
+		let targetBase = surfaceAddress
+
+		data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+			guard let sourceBase = source.baseAddress,
+				  source.count >= regionHeight * rowLength else {
+				return
+			}
+
+			for row in 0..<regionHeight {
+				let destinationOffset = destinationOffsetOf(row: row + regionY, width: frameBufferWidth) +
+										destinationOffsetOf(column: regionX)
+
+				let target = targetBase.advanced(by: destinationOffset)
+
+				target.copyMemory(from: sourceBase.advanced(by: row * rowLength),
+								  byteCount: rowLength)
+
+				// As every other write does: a pixel never drawn, still zero, is copied opaque.
+				let targetBytes = target.assumingMemoryBound(to: UInt8.self)
+				var idx = alphaOffset
+
+				while idx < rowLength {
+					targetBytes[idx] = fixedAlpha
+
+					idx += bytesPerPixel
+				}
+			}
+		}
+
+		if !framebufferHasBeenUpdatedAtLeastOnce {
+			framebufferHasBeenUpdatedAtLeastOnce = true
+		}
     }
 
 	func bufferData(ofRegion region: VNCRegion) -> Data {

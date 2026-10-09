@@ -597,6 +597,124 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertEqual(logger.errorCount, 1)
 	}
 
+	// MARK: - CopyRect: the framebuffer's own pixels (RFC 6143 7.7.2)
+
+	/// Sixteen pixels of the server's format at `depth`, each a different colour as drawn: at 8 bits
+	/// RGB 2-2-2 bit fields (or colour map entries), at 16 bits RGB 5-5-5, at 24 bits 8-8-8.
+	private func distinctPixels(depth: UInt8) -> [UInt32] {
+		(0..<16).map { index -> UInt32 in
+			let step = UInt32(index)
+
+			switch depth {
+				case 24: return (step &* 0x0f_1e_2d &+ 0x10_20_30) & 0xff_ffff
+				case 16: return ((step & 3) << 13) | (((step >> 2) & 3) << 8) | ((step * 2) & 0x1f)
+				default: return (step &* 17) & 0x3f
+			}
+		}
+	}
+
+	/// The kit's 8-bit depth with a colour map of its 256 entries, each a different colour.
+	private func receiveDistinctColourMap(_ session: TestSession) async throws {
+		var colours = [(UInt16, UInt16, UInt16)]()
+
+		for index in 0..<256 {
+			let red = UInt16(index * 257)
+			let green = UInt16((255 - index) * 257)
+			let blue = UInt16((index * 7) % 256 * 257)
+
+			colours.append((red, green, blue))
+		}
+
+		try await session.receiveColourMapEntries(firstColour: 0, colours: colours)
+	}
+
+	/// A Raw 4x4 rectangle, then a CopyRect of it to its right, at each of the kit's depths -- 8
+	/// bits by bit fields and by a colour map, 16 and 24. The copy took the surface's own bytes,
+	/// four a pixel, for pixels in the server's format: at 16 bits all sixteen copied pixels
+	/// differed from their source, at 8 bits fifteen; at 24 bits, where the two formats are the
+	/// same four bytes, none.
+	func testCopyRectCopiesThePixelsAsDrawn() async throws {
+		for (depth, colourMap) in [(UInt8(8), false), (8, true), (16, false), (24, false)] {
+			let label = "depth \(depth)\(colourMap ? " with a colour map" : "")"
+			let session = try TestSession(width: 8, height: 4, depth: depth)
+			let bytesPerPixel = depth > 16 ? 4 : (depth > 8 ? 2 : 1)
+
+			if colourMap {
+				try await receiveDistinctColourMap(session)
+			}
+
+			var stream = ServerStream()
+			stream.framebufferUpdateHeader(rectangles: 2)
+			stream.rectangle(x: 0, y: 0, width: 4, height: 4, encoding: 0)
+			distinctPixels(depth: depth).forEach { stream.pixel($0, bytesPerPixel: bytesPerPixel) }
+			stream.rectangle(x: 4, y: 0, width: 4, height: 4, encoding: 1)
+			stream.u16(0)
+			stream.u16(0)
+
+			try await session.receiveFramebufferUpdate(stream)
+
+			let source = (0..<4).flatMap { y in (0..<4).map { x in session.pixel(x, y) } }
+			let copy = (0..<4).flatMap { y in (4..<8).map { x in session.pixel(x, y) } }
+
+			XCTAssertEqual(Set(source).count, 16, "\(label): the source's sixteen colours")
+			XCTAssertEqual(copy, source, label)
+		}
+	}
+
+	/// A scroll -- a CopyRect whose source and destination overlap, rows 0 to 2 to rows 1 to 3 --
+	/// and a copy of an area never drawn, which comes out opaque black, at each depth.
+	func testCopyRectScrollsAndCopiesWhatWasNeverDrawn() async throws {
+		for depth: UInt8 in [8, 16, 24] {
+			let session = try TestSession(width: 4, height: 8, depth: depth)
+			let bytesPerPixel = depth > 16 ? 4 : (depth > 8 ? 2 : 1)
+
+			var raw = ServerStream()
+			raw.framebufferUpdateHeader(rectangles: 1)
+			raw.rectangle(x: 0, y: 0, width: 4, height: 4, encoding: 0)
+			distinctPixels(depth: depth).forEach { raw.pixel($0, bytesPerPixel: bytesPerPixel) }
+
+			try await session.receiveFramebufferUpdate(raw)
+
+			let rows = (0..<3).map { y in (0..<4).map { x in session.pixel(x, y) } }
+
+			var copies = ServerStream()
+			copies.framebufferUpdateHeader(rectangles: 2)
+			copies.rectangle(x: 0, y: 1, width: 4, height: 3, encoding: 1)
+			copies.u16(0)
+			copies.u16(0)
+			copies.rectangle(x: 0, y: 4, width: 2, height: 2, encoding: 1)
+			copies.u16(0)
+			copies.u16(6)
+
+			try await session.receiveFramebufferUpdate(copies)
+
+			XCTAssertEqual((1..<4).map { y in (0..<4).map { x in session.pixel(x, y) } }, rows, "depth \(depth): the scroll")
+
+			let bytes = session.framebuffer.surfaceAddress.assumingMemoryBound(to: UInt8.self)
+			let undrawn = (4 * 4 + 0) * 4
+
+			XCTAssertEqual(Array(UnsafeBufferPointer(start: bytes + undrawn, count: 4)), [0, 0, 0, 0xff],
+						   "depth \(depth): a copied pixel never drawn")
+		}
+	}
+
+	/// The framebuffer's copy takes regions of one size -- CopyRect's source is its rectangle's size
+	/// -- and a copy between regions of two sizes, the kit's own mistake, is dropped and logged.
+	func testCopyOfARegionToOneOfAnotherSizeDrawsNothing() throws {
+		let logger = QuietLogger()
+		let framebuffer = try makeTestFramebuffer(width: 4, height: 4, depth: 24, logger: logger)
+
+		var white = Data(repeating: 0xff, count: 4 * 4 * 4)
+		framebuffer.update(region: .init(x: 0, y: 0, width: 4, height: 2), data: &white)
+
+		framebuffer.copy(region: .init(x: 0, y: 0, width: 2, height: 2), to: .init(x: 0, y: 2, width: 4, height: 2))
+
+		let bytes = framebuffer.surfaceAddress.assumingMemoryBound(to: UInt8.self)
+
+		XCTAssertTrue((32..<64).allSatisfy { bytes[$0] == 0 }, "a 2x2 region was copied to a 4x2 one")
+		XCTAssertEqual(logger.errorCount, 1)
+	}
+
 	// MARK: - A ceiling on the framebuffer: ServerInit, DesktopSize, ExtendedDesktopSize
 
 	/// 2^28 pixels. Four 8K UHD displays side by side, 30,720 x 4,320, are half of it, and eight,

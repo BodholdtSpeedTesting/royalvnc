@@ -1054,6 +1054,15 @@ final class HostileServerTests: XCTestCase {
 	/// hostile-server vector; f5f8999 moved these lines into the new init without changing them.
 	/// Found in review round 2. Each field below is capped by bytes and the credentials encrypt to a
 	/// 128-byte ciphertext with no trap; an empty field is handled too.
+	///
+	/// And each field lands where rfbproto.rst's Diffie-Hellman Authentication puts it (lines
+	/// 1358-1361: each "encoded using UTF-8, NULL terminated and padded with random data so the
+	/// length of each is 64 bytes"): the username's first 63 bytes from byte 0 and the password's
+	/// from byte 64, each followed by a 0, the fill everywhere else. Those 128 bytes are encrypted
+	/// here under the same key, the MD5 digest of the shared secret, and compared with what the kit
+	/// sends; AES-128 in ECB mode is one-to-one a block under one key, so equal ciphertexts are equal
+	/// plaintexts (and noVNC's vector, above, pins the AES and the digest). A cap of 62 bytes, or the
+	/// two fields swapped, passed when only the ciphertext's length was checked (review round 3).
 	func testARDMultibyteCredentialsOverSixtyThreeBytesAreCappedByBytes() throws {
 		let bytes = Data((0..<128).map { UInt8($0) })
 		let generator = Data([0x7f, 0xff])
@@ -1076,24 +1085,45 @@ final class HostileServerTests: XCTestCase {
 		}
 
 		// A three-byte ideograph (22 of them is 66 bytes, 63 is 189), a two-byte accented letter (32
-		// is 64 bytes, 70 is 140), and the empty string. Each trapped or overran before: 22 CJK and
-		// 32 accented on the character-offset index, 63 CJK and 70 accented on the copy.
+		// is 64 bytes, 70 is 140), and the empty string, each as both fields. Each trapped or overran
+		// before: 22 CJK and 32 accented on the character-offset index, 63 CJK and 70 accented on
+		// the copy. Then two different fields a pair, either side of the cap: 63 and 64 bytes, 64
+		// and 63, 66 and 2, 0 and 63.
 		let cjk = "\u{4e00}", accented = "\u{00e9}"
-		let fields = [String(repeating: cjk, count: 22),
-					  String(repeating: accented, count: 32),
-					  String(repeating: cjk, count: 63),
-					  String(repeating: accented, count: 70),
-					  ""]
+		var credentials = [String(repeating: cjk, count: 22),
+						   String(repeating: accented, count: 32),
+						   String(repeating: cjk, count: 63),
+						   String(repeating: accented, count: 70),
+						   ""].map { (username: $0, password: $0) }
 
-		for field in fields {
+		credentials += [(String(repeating: "u", count: 63), String(repeating: "p", count: 64)),
+						(String(repeating: accented, count: 32), String(repeating: cjk, count: 21)),
+						(String(repeating: cjk, count: 22), "pw"),
+						("", String(repeating: "q", count: 63))]
+
+		let key = agreement.secretKey.md5Hash()
+
+		for (username, password) in credentials {
+			let label = "a \(username.utf8.count)-byte username and a \(password.utf8.count)-byte password"
 			let authentication = VNCProtocol.ARDAuthentication.Authentication(agreement: agreement,
-																			  username: field,
-																			  password: field,
+																			  username: username,
+																			  password: password,
 																			  fill: bytes)
 
-			XCTAssertEqual(authentication?.cipherText.count, 128,
-						   "a \(field.utf8.count)-byte field gave no 128-byte ciphertext")
+			XCTAssertEqual(authentication?.cipherText.count, 128, "\(label) gave no 128-byte ciphertext")
 			XCTAssertEqual(authentication?.publicKey, publicValue)
+
+			var plainText = bytes
+			let usernameBytes = Array(username.utf8.prefix(63))
+			let passwordBytes = Array(password.utf8.prefix(63))
+
+			plainText.replaceSubrange(0..<usernameBytes.count, with: usernameBytes)
+			plainText[usernameBytes.count] = 0
+			plainText.replaceSubrange(64..<64 + passwordBytes.count, with: passwordBytes)
+			plainText[64 + passwordBytes.count] = 0
+
+			XCTAssertEqual(authentication?.cipherText, plainText.aes128ECBEncrypted(withKey: key),
+						   "\(label): not the fields where rfbproto.rst puts them")
 		}
 	}
 }

@@ -6,9 +6,9 @@
 // the process down: a Swift arithmetic overflow and a range precondition are traps, not errors.
 // At 2ad33e2 each test here ends the test process with a signal; since the fix each one passes.
 //
-// Written against nothing that 2ad33e2 lacks, so the file can be dropped into a checkout of that
-// commit to watch the traps happen. The rule each fix applies is tested on its own in
-// HostileServerTests.
+// Written against nothing in the kit that 2ad33e2 lacks, so this file, with ScriptedReader.swift,
+// can be dropped into a checkout of that commit to watch the traps happen. The rule each fix
+// applies is tested on its own in HostileServerTests.
 
 import XCTest
 @testable import RoyalVNCKit

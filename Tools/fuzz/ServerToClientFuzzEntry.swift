@@ -3,10 +3,12 @@
 // whose session, generators and seeds the seeded fuzz in the suite runs too.
 //
 // FUZZ_FAMILY picks what a run spends its time on: one of FuzzFamily.all's names, each a set of
-// encodings its rectangles keep to (raw-copyrect, rre-corre, hextile, zlib, zrle, tight, pseudo)
-// or every encoding with other messages between them (messages); or "ard", Apple Remote
-// Desktop's Diffie-Hellman parameters. FUZZ_WRITE_SEEDS=<directory> writes the family's seeds
-// there -- the generators' inputs and the regression tests' streams -- and exits.
+// encodings the rectangles an input lays out have (raw-copyrect, rre-corre, hextile, zlib, zrle,
+// tight, pseudo), or every encoding with other messages laid out between them (messages); or
+// "ard", Apple Remote Desktop's Diffie-Hellman parameters. Bytes a decoder leaves unread or reads
+// past are decoded as whatever they spell, so other encodings and message types appear too, and
+// the exit tally shows how many. FUZZ_WRITE_SEEDS=<directory> writes the family's seeds there --
+// the generators' inputs and the regression tests' streams -- and exits.
 
 import Foundation
 

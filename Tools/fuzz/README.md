@@ -13,18 +13,20 @@ are the suite's generators and the regression tests' streams.
 
 ## Families
 
-`FUZZ_FAMILY` picks what a run spends its time on. A family's rectangles keep to its encodings
-whatever libFuzzer does to the bytes (each rectangle's encoding is the family's, picked by index).
+`FUZZ_FAMILY` picks what a run spends its time on. The rectangles an input lays out have the
+family's encodings, picked by index, whatever libFuzzer does to the bytes. Bytes a decoder leaves
+unread or reads past are decoded as whatever they spell, so other encodings and message types
+appear too -- the stream is out of step -- and the exit tally shows how many.
 
-| Family         | Rectangles                                                         | Other messages |
-|----------------|--------------------------------------------------------------------|----------------|
-| `raw-copyrect` | Raw, CopyRect                                                      | no             |
-| `rre-corre`    | RRE, CoRRE                                                         | no             |
-| `hextile`      | Hextile                                                            | no             |
-| `zlib`         | zlib                                                               | no             |
-| `zrle`         | ZRLE                                                               | no             |
-| `tight`        | Tight                                                              | no             |
-| `pseudo`       | DesktopSize, ExtendedDesktopSize, Cursor, DesktopName, LastRect, Raw | no           |
+| Family         | Rectangles laid out                                                | Other messages laid out |
+|----------------|--------------------------------------------------------------------|-------------------------|
+| `raw-copyrect` | Raw, CopyRect                                                      | no                      |
+| `rre-corre`    | RRE, CoRRE                                                         | no                      |
+| `hextile`      | Hextile                                                            | no                      |
+| `zlib`         | zlib                                                               | no                      |
+| `zrle`         | ZRLE                                                               | no                      |
+| `tight`        | Tight                                                              | no                      |
+| `pseudo`       | DesktopSize, ExtendedDesktopSize, Cursor, DesktopName, LastRect, Raw | no                    |
 | `messages`     | all of the above, and unknown encodings                            | SetColourMapEntries, ServerCutText, Bell, EndOfContinuousUpdates, unknown |
 | `ard`          | -- the input is the parameters themselves: generator, key size, prime, public value | -- |
 

@@ -178,8 +178,10 @@ struct FuzzFamily {
 extension FuzzInput {
 	/// A libFuzzer input, as bytes: [depth][chunk][width u16][height u16], then records, each
 	/// [0][encoding index][x][y][width][height][length u16][payload] or [1][length u16][message].
-	/// The encoding is the family's, picked by index, so that whatever libFuzzer does to the
-	/// bytes the run keeps to its family. Read leniently: a record cut short ends the input.
+	/// The rectangles an input lays out have the family's encodings, picked by index, whatever
+	/// libFuzzer does to the bytes; bytes a decoder leaves unread or reads past are decoded as
+	/// whatever they spell, so other encodings and message types appear too, and the exit tally
+	/// shows how many. Read leniently: a record cut short ends the input.
 	init(fuzzBytes bytes: [UInt8], family: FuzzFamily) {
 		var index = 0
 
@@ -797,7 +799,7 @@ struct FuzzGenerator {
 					case 0: sx = Int(rng.edge16())
 					case 1: sy = Int(rng.edge16())
 					case 2: sw = Int(rng.edge16())
-					default: sh = w - sx + 1
+					default: sh = h - sy + 1
 				}
 			}
 

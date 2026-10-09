@@ -10,7 +10,8 @@ final class FuzzFindingTests: XCTestCase {
 
 	/// A JPEG that cannot be read. Away from Apple's platforms swift-jpeg decodes it, and its own
 	/// error -- a LexingError -- reached the embedder as it was, where every other decoder's is a
-	/// VNCError with something to show. Found by the seeded fuzz on Linux, 220 sessions of 32,000.
+	/// VNCError with something to show. Found by the seeded fuzz on Linux: with this fix taken out,
+	/// 227 of the 32,000 sessions at seeds 11 to 18 (19 of the 3,000 at its defaults) end with it.
 	func testTightJPEGThatCannotBeReadIsRefusedWithTheKitsError() async throws {
 		for jpeg: [UInt8] in [
 			[0xff, 0xd8, 0xff, 0xc0, 0x00, 0x03, 0x01],
@@ -338,8 +339,8 @@ final class FuzzFindingTests: XCTestCase {
 	}
 
 	/// A length of 0x80000000 is Int32.min read as signed, which the kit takes for the extended
-	/// form, and `Int32(abs(length))` -- one past Int32.max -- trapped. Found by the seeded fuzz,
-	/// seed 1, session 53.
+	/// form, and `Int32(abs(length))` -- one past Int32.max -- trapped. Found by the seeded fuzz:
+	/// with this fix taken out, its default run traps at seed 1, session 20 (counting from 0).
 	func testServerCutTextOfLength0x80000000IsRefused() async throws {
 		var stream = ServerStream()
 		stream.append([0, 0, 0])

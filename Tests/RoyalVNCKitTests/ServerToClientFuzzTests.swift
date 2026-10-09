@@ -24,10 +24,13 @@
 // The report says what each decoder and each message type was fed -- how many, how many bytes the
 // kit read for them -- and how each ended. In the suite testFuzz runs `defaultSeeds` at
 // `defaultSessionsPerSeed`. For more, in the fork's root:
-//   FUZZ_SEEDS=1,2,3,4,5,6,7,8 FUZZ_SESSIONS=20000 swift test --filter ServerToClientFuzzTests
+//   FUZZ_SEED=31 FUZZ_SESSIONS=100000 swift test --filter ServerToClientFuzzTests
 // and the same with `-c release -Xswiftc -enable-testing`, which is the build people run: some of
-// what this found was compiled into debug builds only. Tools/fuzz runs the same generators as
-// seeds for libFuzzer, coverage-guided and under AddressSanitizer.
+// what this found was compiled into debug builds only. More sessions from one seed rather than
+// more seeds: FRng starts seed n one draw past seed n - 1, and two seeds' sessions fall into step
+// -- seed 5's from its session 1,157 on, seed 2's from its 9,147 -- after which they repeat each
+// other's. Tools/fuzz runs the same generators as seeds for libFuzzer, coverage-guided and under
+// AddressSanitizer.
 
 import XCTest
 import Foundation
@@ -131,8 +134,9 @@ final class ServerToClientFuzzTests: XCTestCase {
 
 		// Every decoder and message type was reached, and each decoded something: a generator
 		// that stopped producing anything a decoder accepts would make the run look clean and
-		// test nothing.
-		for encoding: Int64 in [0, 1, 2, 4, 5, 6, 7, 16, -223, -308, -239] {
+		// test nothing. LastRect, which FramebufferUpdate.receive handles itself, has no decoder
+		// to count.
+		for encoding: Int64 in [0, 1, 2, 4, 5, 6, 7, 16, -223, -308, -239, -307] {
 			XCTAssertGreaterThan(tally.decoders[encoding]?.outcomes["decoded"] ?? 0, 0,
 								 "\(FuzzTally.encodingName(encoding)) never decoded anything")
 		}

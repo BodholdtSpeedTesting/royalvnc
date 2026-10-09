@@ -120,14 +120,16 @@ final class FuzzFindingTests: XCTestCase {
 
 	// MARK: - Tight's JPEG is the rectangle's size (rfbproto.rst, Tight Encoding; ITU-T T.81)
 
-	/// A baseline JPEG (ITU-T T.81) whose frame header (B.2.2) declares `width` x `height`: a
-	/// quantization table of ones, a DC and an AC Huffman table of one one-bit code each (DC
-	/// difference category 0, AC end of block), one scan of every component whose entropy-coded
-	/// data is `scan` -- `blocks(_:)`, or zero bytes, four mid-grey blocks each -- then a DNL
-	/// segment (B.2.5) of `lines` if given, and the end of the image.
+	/// A baseline JPEG (ITU-T T.81) whose frame header (B.2.2) declares `width` x `height`, each
+	/// component sampled `sampling` (H and V, four bits each): a quantization table of ones, a DC
+	/// and an AC Huffman table of one one-bit code each (DC difference category 0, AC end of
+	/// block), one scan of every component whose entropy-coded data is `scan` -- `blocks(_:)`, or
+	/// zero bytes, four mid-grey blocks each -- then a DNL segment (B.2.5) of `lines` if given, and
+	/// the end of the image.
 	static func jpeg(width: UInt16,
 					 height: UInt16,
 					 components: Int = 1,
+					 sampling: UInt8 = 0x11,
 					 scan: [UInt8],
 					 lines: UInt16? = nil) -> [UInt8] {
 		var bytes: [UInt8] = [0xff, 0xd8]
@@ -138,7 +140,7 @@ final class FuzzFindingTests: XCTestCase {
 				  UInt8(components)]
 
 		for component in 1...components {
-			bytes += [UInt8(component), 0x11, 0x00]
+			bytes += [UInt8(component), sampling, 0x00]
 		}
 
 		bytes += [0xff, 0xc4, 0x00, 0x14, 0x00, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00]
@@ -354,34 +356,111 @@ final class FuzzFindingTests: XCTestCase {
 		}
 	}
 
+	/// A marker segment (ITU-T T.81 B.1.1.4): X'FF' and the marker's code, then a two-byte length
+	/// that counts itself and `payload`.
+	static func segment(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] {
+		[0xff, marker, UInt8((payload.count + 2) >> 8), UInt8((payload.count + 2) & 0xff)] + payload
+	}
+
+	/// A DRI segment (T.81 B.2.4.4): a restart interval of `interval` MCUs.
+	static func restartInterval(_ interval: UInt16) -> [UInt8] {
+		segment(0xdd, [UInt8(interval >> 8), UInt8(interval & 0xff)])
+	}
+
+	/// A scan header (T.81 B.2.3): `components`, each with DC and AC table 0, then Ss, Se, Ah and Al.
+	static func scanHeader(_ components: [UInt8], ss: UInt8, se: UInt8, ah: UInt8 = 0, al: UInt8 = 0) -> [UInt8] {
+		segment(0xda, [UInt8(components.count)] + components.flatMap { [$0, 0x00] } + [ss, se, ah << 4 | al])
+	}
+
+	/// A scan's entropy-coded data in `count` restart-delimited segments (T.81 B.2.1), each
+	/// `segment`, an RSTm marker between each two, m counting 0 to 7 from the scan's first.
+	static func restartSegments(_ segment: [UInt8], count: Int) -> [UInt8] {
+		var bytes = [UInt8]()
+
+		for k in 0..<count {
+			if k > 0 { bytes += [0xff, 0xd0 | UInt8((k - 1) % 8)] }
+
+			bytes += segment
+		}
+
+		return bytes
+	}
+
+	/// A progressive JPEG (T.81 SOF2; B.2.2) of a `side` x `side` image of three components, the
+	/// first sampled `firstSampling` and the other two 1 x 1, with `jpeg(...)`'s quantization and
+	/// Huffman tables; then `scans`, the scans and whatever comes between them, and the end of the
+	/// image. Every coefficient the scans carry is zero -- each block a DC difference of category
+	/// 0 or a refinement bit of 0, its AC bands an end of block -- so the image is mid-grey.
+	static func progressiveJPEG(side: UInt16, firstSampling: UInt8, scans: [UInt8]) -> [UInt8] {
+		var bytes: [UInt8] = [0xff, 0xd8]
+
+		bytes += segment(0xdb, [0x00] + [UInt8](repeating: 1, count: 64))
+		bytes += segment(0xc2, [0x08, UInt8(side >> 8), UInt8(side & 0xff), UInt8(side >> 8), UInt8(side & 0xff), 0x03,
+								0x01, firstSampling, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00])
+		bytes += segment(0xc4, [0x00, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+		bytes += segment(0xc4, [0x10, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+
+		return bytes + scans + [0xff, 0xd9]
+	}
+
 	/// A progressive JPEG (ITU-T T.81, SOF2) of an 8 x 8 one-component image: a DC first scan and
 	/// an AC first scan (band 1-63), each entropy-coded segment one 0x7f byte, a restart interval
 	/// (DRI, B.2.4.4) of one data unit, and `acSegments` restart-delimited segments in the AC scan
 	/// with RSTm markers between them. The 8 x 8 image is a single data unit, so two or more AC
-	/// segments place a segment at or past the grid.
-	static func progressiveRestartJPEG(acSegments: Int) -> [UInt8] {
-		func seg(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] {
-			[0xff, marker, UInt8((payload.count + 2) >> 8), UInt8((payload.count + 2) & 0xff)] + payload
-		}
-
+	/// segments place a segment at or past the grid. The DRI follows the Huffman tables or, with
+	/// `driBeforeFrame`, directly follows SOI: a frame header may be preceded by table-specification
+	/// and miscellaneous segments (B.2.1), a DRI among them (B.2.4).
+	static func progressiveRestartJPEG(acSegments: Int, driBeforeFrame: Bool = false) -> [UInt8] {
 		var bytes: [UInt8] = [0xff, 0xd8]
 
-		bytes += seg(0xdb, [0x00] + [UInt8](repeating: 1, count: 64))
-		bytes += seg(0xc2, [0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00])
-		bytes += seg(0xc4, [0x00, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
-		bytes += seg(0xc4, [0x10, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
-		bytes += seg(0xdd, [0x00, 0x01])
-		bytes += seg(0xda, [0x01, 0x01, 0x00, 0x00, 0x00, 0x00])
-		bytes += [0x7f]
-		bytes += seg(0xda, [0x01, 0x01, 0x00, 0x01, 0x3f, 0x00])
-
-		for k in 0..<acSegments {
-			if k > 0 { bytes += [0xff, 0xd0 | UInt8((k - 1) % 8)] }
-
-			bytes += [0x7f]
+		if driBeforeFrame {
+			bytes += restartInterval(1)
 		}
 
+		bytes += segment(0xdb, [0x00] + [UInt8](repeating: 1, count: 64))
+		bytes += segment(0xc2, [0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00])
+		bytes += segment(0xc4, [0x00, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+		bytes += segment(0xc4, [0x10, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+
+		if !driBeforeFrame {
+			bytes += restartInterval(1)
+		}
+
+		bytes += scanHeader([1], ss: 0, se: 0) + [0x7f]
+		bytes += scanHeader([1], ss: 1, se: 63) + restartSegments([0x7f], count: acSegments)
+
 		return bytes + [0xff, 0xd9]
+	}
+
+	/// Restart-delimited segments (T.81 B.2.4.4) past the grid of the scan under test, refused
+	/// before the scan is decoded. `jpeg(n)` is a `side` x `side` JPEG in which that scan has n
+	/// segments, at a restart interval of one unit over a grid of one: one segment, conformant, is
+	/// drawn mid-grey; two, three and four are refused as invalidData. swift-jpeg's decoders of a
+	/// progressive scan's AC bands and of DC refinement clamp only the upper bound of a segment's
+	/// row range, so a segment that starts past the grid traps them ("Range requires lowerBound <=
+	/// upperBound"), but the second segment's range is empty: were the guard to miss them, two
+	/// segments would be drawn, not trapped on. They are the canary. Three and four, which do trap,
+	/// are sent only once two are seen refused, so that a guard gone wrong fails the test rather
+	/// than crashing whoever runs it.
+	private func assertSegmentsPastTheGridAreRefused(side: UInt16,
+													 label: String,
+													 jpeg: (Int) -> [UInt8],
+													 file: StaticString = #filePath,
+													 line: UInt = #line) async throws {
+		await assertDrawnMidGrey(width: side, height: side, jpeg: jpeg(1), label: "\(label), one segment",
+								 file: file, line: line)
+
+		guard try await isRefusedAsInvalidData(Self.tightJPEGUpdate(width: side, height: side, jpeg: jpeg(2)),
+											   framebufferWidth: 32, framebufferHeight: 32,
+											   label: "\(label), two segments", file: file, line: line) else {
+			return
+		}
+
+		for segments in [3, 4] {
+			_ = try await isRefusedAsInvalidData(Self.tightJPEGUpdate(width: side, height: side, jpeg: jpeg(segments)),
+												 framebufferWidth: 32, framebufferHeight: 32,
+												 label: "\(label), \(segments) segments", file: file, line: line)
+		}
 	}
 
 	/// A progressive JPEG whose AC scan is split by restart markers into more restart-delimited
@@ -394,27 +473,62 @@ final class FuzzFindingTests: XCTestCase {
 	/// before the scan is decoded. Found in review round 2. (ImageIO, on Apple's platforms, decodes
 	/// the image.)
 	///
-	/// An 8 x 8 one-component image is a single data unit, so two or more AC segments are excess. Two
-	/// segments are refused but would not themselves trap (the second segment's row range is empty),
-	/// so they are the canary: were the guard gone they would be drawn, not refused, and the three-
-	/// and four-segment inputs below -- which do trap -- would never be sent, so this test fails
-	/// cleanly rather than crashing whoever runs it.
+	/// An 8 x 8 one-component image is a single data unit, so two or more AC segments are excess;
+	/// two are the canary (`assertSegmentsPastTheGridAreRefused`). With the DRI after the frame
+	/// header and with it before: the guard takes the restart interval in force from either, and a
+	/// guard that lost one defined before the frame missed every segment here (review round 3).
 	func testTightJPEGProgressiveScanWithExcessRestartSegmentsIsRefused() async throws {
 		try skipWhereImageIODecodesJPEGs()
 
-		let canary = Self.tightJPEGUpdate(width: 8, height: 8, jpeg: Self.progressiveRestartJPEG(acSegments: 2))
-
-		guard try await isRefusedAsInvalidData(canary, framebufferWidth: 32, framebufferHeight: 32,
-											   label: "a progressive AC scan of two restart segments") else {
-			return
+		for driBeforeFrame in [false, true] {
+			try await assertSegmentsPastTheGridAreRefused(side: 8,
+														  label: "a progressive AC scan, its DRI \(driBeforeFrame ? "before" : "after") the frame header") {
+				Self.progressiveRestartJPEG(acSegments: $0, driBeforeFrame: driBeforeFrame)
+			}
 		}
+	}
 
-		for acSegments in [3, 4] {
-			let update = Self.tightJPEGUpdate(width: 8, height: 8,
-											  jpeg: Self.progressiveRestartJPEG(acSegments: acSegments))
+	/// The guard measures an interleaved scan (more than one component; T.81 A.2.3) against the
+	/// frame's MCU grid. Two progressive frames, each a single MCU, with an interleaved DC
+	/// refinement scan (Ah 1, Al 0, after a DC first scan at Al 1; G.1.1.1.2) split into restart
+	/// segments at an interval of one MCU: an 8 x 8 frame of three components sampled 1 x 1, and a
+	/// 16 x 16 one whose first component is sampled 2 x 2, its data units 2 x 2. Left unbounded, an
+	/// interleaved scan's three segments trap swift-jpeg's interleaved refinement decoder; measured
+	/// by its first component's data units, the second frame's three would get through to it
+	/// (review round 3). (ImageIO, on Apple's platforms, decodes these.)
+	func testTightJPEGInterleavedScanWithExcessRestartSegmentsIsRefused() async throws {
+		try skipWhereImageIODecodesJPEGs()
 
-			_ = try await isRefusedAsInvalidData(update, framebufferWidth: 32, framebufferHeight: 32,
-												 label: "a progressive AC scan of \(acSegments) restart segments")
+		// One bit a block: three blocks to the MCU, then six.
+		for (side, firstSampling, mcu) in [(UInt16(8), UInt8(0x11), UInt8(0x1f)), (16, 0x22, 0x03)] {
+			try await assertSegmentsPastTheGridAreRefused(side: side,
+														  label: "an interleaved DC refinement scan, \(side) x \(side)") {
+				Self.progressiveJPEG(side: side,
+									 firstSampling: firstSampling,
+									 scans: Self.restartInterval(1)
+										+ Self.scanHeader([1, 2, 3], ss: 0, se: 0, al: 1) + [mcu]
+										+ Self.scanHeader([1, 2, 3], ss: 0, se: 0, ah: 1)
+										+ Self.restartSegments([mcu], count: $0))
+			}
+		}
+	}
+
+	/// The guard measures a scan of one component (T.81 A.2.2) against that component's own data
+	/// units, whichever component it is. A 16 x 16 progressive frame whose first component, sampled
+	/// 2 x 2, has 2 x 2 data units and whose second has one, and an AC first scan (G.1.1.1.1) of the
+	/// second split into restart segments at an interval of one unit. Measured by the frame's first
+	/// component, three segments would get through, and swift-jpeg's AC decoder traps on them
+	/// (review round 3). (ImageIO, on Apple's platforms, decodes this.)
+	func testTightJPEGScanOfALaterComponentWithExcessRestartSegmentsIsRefused() async throws {
+		try skipWhereImageIODecodesJPEGs()
+
+		try await assertSegmentsPastTheGridAreRefused(side: 16, label: "an AC scan of the second component") {
+			Self.progressiveJPEG(side: 16,
+								 firstSampling: 0x22,
+								 scans: Self.scanHeader([1, 2, 3], ss: 0, se: 0) + [0x03]
+									+ Self.restartInterval(1)
+									+ Self.scanHeader([2], ss: 1, se: 63)
+									+ Self.restartSegments([0x7f], count: $0))
 		}
 	}
 
@@ -451,7 +565,9 @@ final class FuzzFindingTests: XCTestCase {
 	/// JPEGs of their rectangle's size, their entropy-coded data padded as T.81 has it, decode as
 	/// before: one and three components, sizes that are and are not whole blocks, a progressive
 	/// one (G.1.1.1.1, a DC scan alone), and restart intervals (B.2.4.4) -- their RSTm markers in
-	/// order, and refused out of order, as swift-jpeg refused them.
+	/// order, and refused out of order, as swift-jpeg refused them; and as many restart intervals as
+	/// a scan's own grid holds, where that is not the frame's MCU grid or the MCU grid is not one
+	/// data unit: an interleaved scan, and scans of a component sampled 2 x 2.
 	func testTightJPEGOfItsRectanglesSizeIsDrawn() async throws {
 		try skipWhereImageIODecodesJPEGs()
 
@@ -498,6 +614,41 @@ final class FuzzFindingTests: XCTestCase {
 				}
 			}
 		}
+
+		// Each scan's restart intervals counted against its own grid, which the restart-segment
+		// guard has to measure (review round 3). An interleaved scan's is the MCU grid (A.2.3): 16 x
+		// 16, three components sampled 1 x 1, so 2 x 2 MCUs of three blocks; a DRI of two MCUs, a
+		// row, each interval's twelve bits padded to two bytes.
+		var interleaved = Self.jpeg(width: 16, height: 16, components: 3, scan: [])
+
+		interleaved.insert(contentsOf: Self.restartInterval(2), at: interleaved.count - 2 - 14)
+		interleaved.insert(contentsOf: Self.restartSegments([0x00, 0x0f], count: 2), at: interleaved.count - 2)
+
+		await assertDrawnMidGrey(width: 16, height: 16, jpeg: interleaved,
+								 label: "restart intervals in an interleaved scan")
+
+		// A scan of one component, its own data units (A.2.2): 16 x 16 sampled 2 x 2, so 2 x 2 units
+		// where the frame's MCU grid is one MCU; a DRI of two units, a row, four bits an interval.
+		var subsampled = Self.jpeg(width: 16, height: 16, sampling: 0x22, scan: [])
+
+		subsampled.insert(contentsOf: Self.restartInterval(2), at: subsampled.count - 2 - 10)
+		subsampled.insert(contentsOf: Self.restartSegments([0x0f], count: 2), at: subsampled.count - 2)
+
+		await assertDrawnMidGrey(width: 16, height: 16, jpeg: subsampled,
+								 label: "restart intervals in a scan of a component sampled 2 x 2")
+
+		// The same in a progressive frame of three components, the first sampled 2 x 2, so one MCU
+		// of six blocks: an interleaved DC first scan, then an AC first scan (G.1.1.1.1) of the first
+		// component alone, a row of its units -- two blocks, an end of block each -- an interval.
+		let progressiveRestarts = Self.progressiveJPEG(side: 16,
+													   firstSampling: 0x22,
+													   scans: Self.restartInterval(2)
+														+ Self.scanHeader([1, 2, 3], ss: 0, se: 0) + [0x03]
+														+ Self.scanHeader([1], ss: 1, se: 63)
+														+ Self.restartSegments([0x3f], count: 2))
+
+		await assertDrawnMidGrey(width: 16, height: 16, jpeg: progressiveRestarts,
+								 label: "restart intervals in a progressive scan of a component sampled 2 x 2")
 	}
 
 	/// A test failure naming `label` unless `jpeg`, in a Tight rectangle of its size at the

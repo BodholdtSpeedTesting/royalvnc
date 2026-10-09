@@ -274,6 +274,100 @@ final class FuzzFindingTests: XCTestCase {
 		}
 	}
 
+	/// A progressive JPEG (ITU-T T.81, SOF2) of an 8 x 8 one-component image: a DC first scan and
+	/// an AC first scan (band 1-63), each entropy-coded segment one 0x7f byte, a restart interval
+	/// (DRI, B.2.4.4) of one data unit, and `acSegments` restart-delimited segments in the AC scan
+	/// with RSTm markers between them. The 8 x 8 image is a single data unit, so two or more AC
+	/// segments place a segment at or past the grid.
+	static func progressiveRestartJPEG(acSegments: Int) -> [UInt8] {
+		func seg(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] {
+			[0xff, marker, UInt8((payload.count + 2) >> 8), UInt8((payload.count + 2) & 0xff)] + payload
+		}
+
+		var bytes: [UInt8] = [0xff, 0xd8]
+
+		bytes += seg(0xdb, [0x00] + [UInt8](repeating: 1, count: 64))
+		bytes += seg(0xc2, [0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00])
+		bytes += seg(0xc4, [0x00, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+		bytes += seg(0xc4, [0x10, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+		bytes += seg(0xdd, [0x00, 0x01])
+		bytes += seg(0xda, [0x01, 0x01, 0x00, 0x00, 0x00, 0x00])
+		bytes += [0x7f]
+		bytes += seg(0xda, [0x01, 0x01, 0x00, 0x01, 0x3f, 0x00])
+
+		for k in 0..<acSegments {
+			if k > 0 { bytes += [0xff, 0xd0 | UInt8((k - 1) % 8)] }
+
+			bytes += [0x7f]
+		}
+
+		return bytes + [0xff, 0xd9]
+	}
+
+	/// A progressive JPEG whose AC scan is split by restart markers into more restart-delimited
+	/// segments than its grid of data units holds. swift-jpeg's progressive AC and refining band
+	/// decoders clamp only the upper bound of a segment's row range (`blocks.lowerBound / units.x
+	/// ..< min(blocks.upperBound / units.x, units.y)`), so a segment beginning at or past the grid
+	/// gives a Range with lowerBound > upperBound and traps (signal 5), through the staged decoder
+	/// and through the one-call decompress alike -- a pre-existing swift-jpeg defect the frame-header
+	/// gating did not cover. The kit now bounds the segments against the grid and refuses the excess
+	/// before the scan is decoded. Found in review round 2. (ImageIO, on Apple's platforms, decodes
+	/// the image.)
+	///
+	/// An 8 x 8 one-component image is a single data unit, so two or more AC segments are excess. Two
+	/// segments are refused but would not themselves trap (the second segment's row range is empty),
+	/// so they are the canary: were the guard gone they would be drawn, not refused, and the three-
+	/// and four-segment inputs below -- which do trap -- would never be sent, so this test fails
+	/// cleanly rather than crashing whoever runs it.
+	func testTightJPEGProgressiveScanWithExcessRestartSegmentsIsRefused() async throws {
+		try skipWhereImageIODecodesJPEGs()
+
+		let canary = Self.tightJPEGUpdate(width: 8, height: 8, jpeg: Self.progressiveRestartJPEG(acSegments: 2))
+
+		guard try await isRefusedAsInvalidData(canary, framebufferWidth: 32, framebufferHeight: 32,
+											   label: "a progressive AC scan of two restart segments") else {
+			return
+		}
+
+		for acSegments in [3, 4] {
+			let update = Self.tightJPEGUpdate(width: 8, height: 8,
+											  jpeg: Self.progressiveRestartJPEG(acSegments: acSegments))
+
+			_ = try await isRefusedAsInvalidData(update, framebufferWidth: 32, framebufferHeight: 32,
+												 label: "a progressive AC scan of \(acSegments) restart segments")
+		}
+	}
+
+	/// A DNL segment (T.81 B.2.5) of zero lines. a8d3f92 refuses every DNL before swift-jpeg parses
+	/// it, which keeps this from reaching swift-jpeg's DNL parser: that parser traps on a DNL of
+	/// zero lines (HeightRedefinition's "height must be positive"; T.81 Table B.10 gives NL as 1 to
+	/// 65,535), through the one-call decompress, at df80ea1 and at main's pin. a8d3f92 removed the
+	/// trap without recording it; review round 2 pins it. No canary is needed -- the DNL refusal is
+	/// in place already. (ImageIO, on Apple's platforms, draws this JPEG.)
+	func testTightJPEGWithADNLOfZeroLinesIsRefused() async throws {
+		try skipWhereImageIODecodesJPEGs()
+
+		let update = Self.tightJPEGUpdate(width: 16, height: 8,
+										  jpeg: Self.jpeg(width: 16, height: 8, scan: Self.blocks(2), lines: 0))
+
+		_ = try await isRefusedAsInvalidData(update, framebufferWidth: 32, framebufferHeight: 32,
+											 label: "a DNL of zero lines")
+	}
+
+	/// An application segment after SOI -- here an APP0 whose identifier is "JFIX", not "JFIF".
+	/// swift-jpeg's one-call decompress read the first APP0 and APP1 directly after SOI as JFIF and
+	/// EXIF and refused a malformed one; the staged decoder passes over every application and comment
+	/// segment unread, wherever it is, as ImageIO does, and draws the image. Noted in review round 2.
+	func testTightJPEGWithAnApplicationSegmentAfterSOIIsDrawn() async throws {
+		try skipWhereImageIODecodesJPEGs()
+
+		var jpeg = Self.jpeg(width: 8, height: 8, scan: Self.blocks(1))
+
+		jpeg.insert(contentsOf: [0xff, 0xe0, 0x00, 0x07, 0x4a, 0x46, 0x49, 0x58, 0x00], at: 2)
+
+		await assertDrawnMidGrey(width: 8, height: 8, jpeg: jpeg, label: "an APP0 'JFIX' after SOI")
+	}
+
 	/// JPEGs of their rectangle's size, their entropy-coded data padded as T.81 has it, decode as
 	/// before: one and three components, sizes that are and are not whole blocks, a progressive
 	/// one (G.1.1.1.1, a DC scan alone), and restart intervals (B.2.4.4) -- their RSTm markers in

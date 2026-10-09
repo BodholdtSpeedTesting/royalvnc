@@ -961,7 +961,14 @@ private extension VNCProtocol.TightEncoding {
     ///   before its first scan is refused -- as is a Y of zero, which leaves the height to a DNL:
     ///   decoded without one, swift-jpeg's inverse DCT traps on it;
     /// - a DNL segment (B.2.5), which defines or redefines Y after the first scan, is refused: Y
-    ///   is the rectangle's height already, and a DNL would make the image taller again;
+    ///   is the rectangle's height already, and a DNL would make the image taller again. It is
+    ///   refused here before swift-jpeg parses it, because its DNL parser traps on a DNL of zero
+    ///   lines (T.81 Table B.10 gives NL as 1 to 65,535); were this blanket refusal ever relaxed --
+    ///   a DNL restating the height is legal -- NL's two bytes would have to be checked first;
+    /// - more restart-delimited segments (B.2.4.4) than a scan's grid of data units holds is
+    ///   refused before the scan is decoded: swift-jpeg's progressive AC and refining band decoders
+    ///   clamp only the upper bound of a segment's row range, so a segment beginning at or past the
+    ///   grid traps them (see the guard below);
     /// - every scan is decoded with `extend: false`, so that entropy-coded data holding more
     ///   lines than Y is not decoded as more of the image, as swift-jpeg's own decompress allows
     ///   for a first scan. Every one of the frame's lines is asked for, too: a scan whose data
@@ -969,8 +976,11 @@ private extension VNCProtocol.TightEncoding {
     ///   where its own decompress stopped a first scan quietly at the end of a row of blocks and
     ///   drew the rows after it mid-grey. (ImageIO, on Apple's platforms, draws such a JPEG.)
     /// Otherwise the segments are taken in the order and the way swift-jpeg's own decompress takes
-    /// them. What is refused here is refused as invalidData; swift-jpeg's own errors are left to
-    /// the caller, which ends the session with them as frameDecode.
+    /// them, but for application and comment segments, which are passed over unread wherever they
+    /// are: swift-jpeg's decompress reads the first APP0 and the first APP1 among those directly
+    /// after SOI as JFIF and EXIF and refuses a malformed one, where the kit, like ImageIO, draws
+    /// such a JPEG. What is refused here is refused as invalidData; swift-jpeg's own errors are left
+    /// to the caller, which ends the session with them as frameDecode.
     static func decodeJPEG(_ data: Data,
                            width: Int,
                            height: Int) throws -> JPEG.Data.Rectangular<JPEG.Common> {
@@ -1033,6 +1043,11 @@ private extension VNCProtocol.TightEncoding {
             context.push(interval: restartInterval)
         }
 
+        // The restart interval in force, in data units, as swift-jpeg's decoder reads it (nil when
+        // none, or when a DRI of zero disables it). Tracked so that a scan's restart-delimited
+        // segments can be bounded against the grid before they are decoded, below.
+        var currentInterval = restartInterval?.interval
+
         marker = try stream.segment()
 
         while true {
@@ -1058,6 +1073,34 @@ private extension VNCProtocol.TightEncoding {
                         }
                     }
 
+                    // More restart-delimited segments than the scan's grid of data units holds is
+                    // refused before they are decoded. swift-jpeg decodes segment k over the data
+                    // units [k * interval, (k + 1) * interval), and a progressive AC or refining
+                    // scan turns that into the row range `blocks.lowerBound / units.x ..<
+                    // min(blocks.upperBound / units.x, units.y)`, clamping only the upper bound; so
+                    // a segment whose first unit is at or past the grid gives lowerBound > upperBound
+                    // and traps (Range requires lowerBound <= upperBound). A conformant encoder
+                    // never writes more segments than ceil(units / interval), so this refuses only a
+                    // malformed stream. The grid is the single component's data units for a
+                    // non-interleaved scan, the MCU grid for an interleaved one, matching which of
+                    // swift-jpeg's decoders the scan reaches.
+                    if segments.count > 1, let stride = currentInterval {
+                        let unitCount: Int
+
+                        if scan.components.count == 1,
+                           let plane = context.spectral.index(forKey: scan.components[0].ci) {
+                            let units = context.spectral[plane].units
+
+                            unitCount = units.x * units.y
+                        } else {
+                            unitCount = context.spectral.blocks.x * context.spectral.blocks.y
+                        }
+
+                        guard (segments.count - 1) * stride < unitCount else {
+                            throw VNCError.protocol(.invalidData)
+                        }
+                    }
+
                     try context.push(scan: scan,
                                      ecss: segments,
                                      extend: false)
@@ -1074,7 +1117,10 @@ private extension VNCProtocol.TightEncoding {
                     tables.dc.forEach { context.push(dc: $0) }
                     tables.ac.forEach { context.push(ac: $0) }
                 case .interval:
-                    context.push(interval: try .parse(marker.data))
+                    let parsedInterval = try JPEG.Header.RestartInterval.parse(marker.data)
+
+                    context.push(interval: parsedInterval)
+                    currentInterval = parsedInterval.interval
                 case .end:
                     return context.spectral.idct().interleaved()
                 case .application, .comment, .arithmeticCodingCondition, .hierarchical, .expandReferenceComponents:

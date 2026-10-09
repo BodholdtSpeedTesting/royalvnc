@@ -1044,6 +1044,58 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertEqual(random.secretKey.count, 128)
 		XCTAssertEqual(random.secretKey.first, 0)
 	}
+
+	/// ARD credentials are capped to 63 UTF-8 bytes, not to 63 characters. Capping by a character
+	/// offset ran `username.index(startIndex, offsetBy: 63)` off the end of a field of fewer than 63
+	/// characters -- a multibyte field over 63 bytes trapped with "String index is out of bounds" --
+	/// and a 63-character slice of multibyte characters was up to 189 bytes and overran the 128-byte
+	/// block (a heap buffer overflow, caught under AddressSanitizer). The username and password are
+	/// user or Keychain input, not a server's, so this is a memory-safety defect, not a
+	/// hostile-server vector; f5f8999 moved these lines into the new init without changing them.
+	/// Found in review round 2. Each field below is capped by bytes and the credentials encrypt to a
+	/// 128-byte ciphertext with no trap; an empty field is handled too.
+	func testARDMultibyteCredentialsOverSixtyThreeBytesAreCappedByBytes() throws {
+		let bytes = Data((0..<128).map { UInt8($0) })
+		let generator = Data([0x7f, 0xff])
+
+		let publicValue = Data(hexBytes("""
+			0000ec05 9c14df5c d71f0be0 adb98b90 f5d95ec9 2932b9bb 445cd298 e4940033
+			e79cf1e3 61ef9ac1 a9fded6f de1043f4 6936bf53 8eeb0a21 cff08253 714447e8
+			c407862c 0cb666f8 aeef52a0 63b7c801 20cc3032 9654e5b5 c827a204 f0f04144
+			f54230d5 15720c09 d1b73dcd 8aa42850 8578945d d674f878 796571dc e1056bed
+			"""))
+
+		guard let agreement = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement(prime: bytes,
+																					   generator: generator,
+																					   peerKey: publicValue,
+																					   keyLength: 128,
+																					   privateKey: bytes) else {
+			XCTFail("the key agreement was refused")
+
+			return
+		}
+
+		// A three-byte ideograph (22 of them is 66 bytes, 63 is 189), a two-byte accented letter (32
+		// is 64 bytes, 70 is 140), and the empty string. Each trapped or overran before: 22 CJK and
+		// 32 accented on the character-offset index, 63 CJK and 70 accented on the copy.
+		let cjk = "\u{4e00}", accented = "\u{00e9}"
+		let fields = [String(repeating: cjk, count: 22),
+					  String(repeating: accented, count: 32),
+					  String(repeating: cjk, count: 63),
+					  String(repeating: accented, count: 70),
+					  ""]
+
+		for field in fields {
+			let authentication = VNCProtocol.ARDAuthentication.Authentication(agreement: agreement,
+																			  username: field,
+																			  password: field,
+																			  fill: bytes)
+
+			XCTAssertEqual(authentication?.cipherText.count, 128,
+						   "a \(field.utf8.count)-byte field gave no 128-byte ciphertext")
+			XCTAssertEqual(authentication?.publicKey, publicValue)
+		}
+	}
 }
 
 /// "FFFF 0001 ..." as bytes.

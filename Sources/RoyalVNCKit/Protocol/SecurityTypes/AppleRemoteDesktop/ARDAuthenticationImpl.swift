@@ -70,27 +70,20 @@ extension VNCProtocol.ARDAuthentication {
 
             var creds = Data(fill)
 
-			let usernameLength = username.utf8.count
-			let passwordLength = password.utf8.count
+			// Each field is capped to 63 UTF-8 bytes, so that the field and its NUL terminator fit
+			// the 64-byte half it is written into. Capped by bytes, not by a character offset:
+			// `username.index(startIndex, offsetBy: 63)` ran off the end of a string of fewer than
+			// 63 characters (a multibyte field over 63 bytes trapped), and a 63-character slice of
+			// multibyte characters was up to 189 bytes and overran the 128-byte block. rfbproto.rst's
+			// Diffie-Hellman Authentication makes each field 64 bytes with its NUL; noVNC cuts each to
+			// 63 bytes of UTF-8 (core/rfb.js _negotiateARDAuthAsync), as MS-Logon II already does.
+			let maxLength = credArraySize / 2 - 1
 
-			let maxLength = 63
+			let usernameC = Array(Data(username.utf8).prefix(maxLength))
+			let passwordC = Array(Data(password.utf8).prefix(maxLength))
 
-			// Cap length at 63 as index is 0
-			let cappedUsername = usernameLength > maxLength
-				? String(username[username.startIndex..<username.index(username.startIndex, offsetBy: maxLength)])
-				: username
-
-			let cappedUsernameLength = cappedUsername.utf8.count
-
-			let cappedPassword = passwordLength > maxLength
-				? String(password[password.startIndex..<password.index(password.startIndex, offsetBy: maxLength)])
-				: password
-
-			let cappedPasswordLength = cappedPassword.utf8.count
-
-            // Convert username and password strings into C strings
-            let usernameC = cappedUsername.utf8CString
-            let passwordC = cappedPassword.utf8CString
+			let cappedUsernameLength = usernameC.count
+			let cappedPasswordLength = passwordC.count
 
 			// Merge username and password into single array
 			let fillCredsSuccess = creds.withUnsafeMutableBytes {

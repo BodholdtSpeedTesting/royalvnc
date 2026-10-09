@@ -787,33 +787,77 @@ final class HostileServerTests: XCTestCase {
 		try await receiveARD(generator: 0xfffd, keySize: 64, prime: narrowPrime, publicValue: small(2, size: 64))
 	}
 
-	/// A prime with a leading zero byte -- noVNC's test of this security type sends one, 128 bytes
-	/// counting up from 0 -- makes every private key and public value below it a byte shorter than
-	/// the key size. The kit refused its own keys for that and failed before sending anything; the
-	/// public value now goes as key-size bytes, padded, as rfbproto.rst has the client send it.
-	func testARDPublicValueShorterThanTheKeySizeIsSentPadded() throws {
-		let prime = Data((0..<128).map { UInt8($0) })
-		var peerKey = [UInt8](prime)
-		peerKey[127] = 0x05
+	/// noVNC's test of this security type (tests/test.rfb.js at acca57b, lines 2096-2186: its random
+	/// bytes stubbed at 2097-2103, 'should return properly encrypted credentials and public key' at
+	/// 2129-2186; the client it tests, core/rfb.js's _negotiateARDAuthAsync, lines 1842-1869): a
+	/// generator of 0x7FFF, a 128-byte prime counting up from 0 -- a leading zero byte -- and the
+	/// same 128 bytes as both sides' private keys and as the credentials' random fill, "user" and
+	/// "password". Its public value and its shared secret are each two bytes short of the key size.
+	/// The kit refused its own keys for that and failed before sending anything; then it sent the
+	/// public value padded but digested the secret without its leading zeros, and encrypted the
+	/// credentials with a key the server did not have. What it sends now is what noVNC's test
+	/// expects: the public value as 128 bytes, and the credentials encrypted with the MD5 digest of
+	/// the 128-byte secret. The expected bytes were worked out from those inputs with OpenSSL, and
+	/// are the ones noVNC's test expects.
+	func testARDKeysShorterThanTheKeySizeAreSentAndDigestedPadded() throws {
+		let bytes = Data((0..<128).map { UInt8($0) })
+		let generator = Data([0x7f, 0xff])
 
-		guard let agreement = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement(prime: prime,
-																					   generator: Data([0x7f, 0xff]),
-																					   peerKey: Data(peerKey),
-																					   keyLength: 128) else {
+		// The server's public value, and with the same private key the client's.
+		let publicValue = Data(hexBytes("""
+			0000ec05 9c14df5c d71f0be0 adb98b90 f5d95ec9 2932b9bb 445cd298 e4940033
+			e79cf1e3 61ef9ac1 a9fded6f de1043f4 6936bf53 8eeb0a21 cff08253 714447e8
+			c407862c 0cb666f8 aeef52a0 63b7c801 20cc3032 9654e5b5 c827a204 f0f04144
+			f54230d5 15720c09 d1b73dcd 8aa42850 8578945d d674f878 796571dc e1056bed
+			"""))
+
+		let cipherText = Data(hexBytes("""
+			c727cc5f be467f42 056a99e4 7bec96ce 3e6b0b04 15f25cb8 0951237d 38a701d7
+			b691b74b f5c52f13 7a5e404c 4da3de8f baae5427 f4b3e372 53e72a6a cd2b9f6e
+			d1f09df6 edce8699 c3705c3c 1cea5b42 8326bbc3 6ea7d4f1 20fad4d5 ca59b415
+			47d9d151 2a3d76f8 417b624e 8b6fca89 32b925ad 3a63bb35 2a7d0da5 e8a3972a
+			"""))
+
+		XCTAssertEqual(publicValue.count, 128)
+		XCTAssertEqual(cipherText.count, 128)
+
+		guard let agreement = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement(prime: bytes,
+																					   generator: generator,
+																					   peerKey: publicValue,
+																					   keyLength: 128,
+																					   privateKey: bytes) else {
 			XCTFail("the key agreement was refused")
 
 			return
 		}
 
-		XCTAssertEqual(agreement.publicKey.count, 128)
-		XCTAssertEqual(agreement.publicKey.first, 0, "a value below this prime takes at most 127 bytes")
+		XCTAssertEqual(agreement.publicKey, publicValue)
+		XCTAssertEqual(agreement.secretKey.count, 128)
+		XCTAssertEqual(agreement.secretKey.prefix(2), Data([0, 0]), "the secret's two leading zero bytes")
 
 		let authentication = VNCProtocol.ARDAuthentication.Authentication(agreement: agreement,
 																		  username: "user",
-																		  password: "password")
+																		  password: "password",
+																		  fill: bytes)
 
-		XCTAssertEqual(authentication?.publicKey.count, 128)
-		XCTAssertEqual(authentication?.cipherText.count, 128)
+		XCTAssertEqual(authentication?.publicKey, publicValue)
+		XCTAssertEqual(authentication?.cipherText, cipherText)
+
+		// A private key of the kit's own, as a session makes: below this prime, so its public value
+		// and secret are at most 127 bytes before padding.
+		guard let random = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement(prime: bytes,
+																					generator: generator,
+																					peerKey: publicValue,
+																					keyLength: 128) else {
+			XCTFail("the key agreement was refused")
+
+			return
+		}
+
+		XCTAssertEqual(random.publicKey.count, 128)
+		XCTAssertEqual(random.publicKey.first, 0)
+		XCTAssertEqual(random.secretKey.count, 128)
+		XCTAssertEqual(random.secretKey.first, 0)
 	}
 }
 

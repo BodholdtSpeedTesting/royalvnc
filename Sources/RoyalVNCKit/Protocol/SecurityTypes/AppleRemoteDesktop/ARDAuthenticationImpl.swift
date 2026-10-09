@@ -22,11 +22,7 @@ extension VNCProtocol.ARDAuthentication {
         init?(agreement: DiffieHellmanKeyAgreement,
               username: String,
               password: String) {
-            // Get MD5 hash of shared secret
-			let secretHash = agreement.secretKey.md5Hash()
-
-            // ciphertext: AES128(shared, username[64]:password[64])
-            let credArraySize = 128
+            let credArraySize = Self.credentialsLength
             var creds = Data(count: credArraySize)
 
             let randomCredsDataSuccess = creds.withUnsafeMutableBytes {
@@ -47,6 +43,32 @@ extension VNCProtocol.ARDAuthentication {
             }
 
             guard randomCredsDataSuccess else { return nil }
+
+            self.init(agreement: agreement,
+                      username: username,
+                      password: password,
+                      fill: creds)
+        }
+
+        /// The 128 bytes the credentials are written over (rfbproto.rst, Diffie-Hellman
+        /// Authentication: each "padded with random data").
+        static let credentialsLength = 128
+
+        /// The credentials written over `fill` -- random bytes, except in the tests, which give
+        /// noVNC's test vector's -- and encrypted.
+        init?(agreement: DiffieHellmanKeyAgreement,
+              username: String,
+              password: String,
+              fill: Data) {
+            // Get MD5 hash of shared secret
+			let secretHash = agreement.secretKey.md5Hash()
+
+            // ciphertext: AES128(shared, username[64]:password[64])
+            let credArraySize = Self.credentialsLength
+
+            guard fill.count == credArraySize else { return nil }
+
+            var creds = Data(fill)
 
 			let usernameLength = username.utf8.count
 			let passwordLength = password.utf8.count

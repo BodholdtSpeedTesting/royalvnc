@@ -28,14 +28,20 @@ extension VNCConnection: VNCFramebufferDelegate {
 					 screens newScreens: [VNCScreen]) {
 		recreateFramebuffer(size: newSize,
 							screens: newScreens,
-							pixelFormat: framebuffer.sourcePixelFormat)
+							pixelFormat: framebuffer.sourcePixelFormat,
+							colorMapFrom: framebuffer)
 	}
 }
 
 extension VNCConnection {
+	/// - Parameter previous: at a resize, the framebuffer the new one replaces, whose colour map
+	///   it keeps. A resize leaves the pixel format as it was, and with it the colour map: only a
+	///   SetPixelFormat empties that (rfbproto.rst, SetPixelFormat, lines 1684-1690), so the map
+	///   is not carried where the client changes its pixel format (`updateColorDepth`).
 	func recreateFramebuffer(size: VNCSize,
 							 screens: [VNCScreen],
-							 pixelFormat: VNCProtocol.PixelFormat) {
+							 pixelFormat: VNCProtocol.PixelFormat,
+							 colorMapFrom previous: VNCFramebuffer? = nil) {
 		state.incrementalUpdatesEnabled = false
 
 		let newFramebuffer: VNCFramebuffer
@@ -53,6 +59,10 @@ extension VNCConnection {
 		}
 
         self.framebuffer?.delegate = nil
+
+		if let previous {
+			newFramebuffer.inheritColorMap(from: previous)
+		}
 
 		newFramebuffer.delegate = self
 

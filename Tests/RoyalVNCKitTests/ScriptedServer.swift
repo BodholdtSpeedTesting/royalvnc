@@ -216,6 +216,118 @@ enum ScriptedServer {
 	}
 }
 
+/// What a connection drew: the framebuffer after the last update it reported, its pixels as
+/// 0xRRGGBB row by row, and how the connection ended.
+struct DrawnFramebuffer {
+	var width = 0
+	var height = 0
+	var pixels = [UInt32]()
+	var ending = ""
+}
+
+/// Keeps a copy of the framebuffer at each update the connection reports, and how it ended.
+final class DrawingWatcher: VNCConnectionDelegate, @unchecked Sendable {
+	private let lock = NSLock()
+	private var drawn = DrawnFramebuffer()
+	private var ended = false
+
+	var result: (drawn: DrawnFramebuffer, ended: Bool) {
+		lock.lock()
+		defer { lock.unlock() }
+
+		return (drawn, ended)
+	}
+
+	func connection(_ connection: VNCConnection, stateDidChange connectionState: VNCConnection.ConnectionState) {
+		guard connectionState.status == .disconnected else {
+			return
+		}
+
+		lock.lock()
+		drawn.ending = connectionState.error.map { "\($0)" } ?? "no error"
+		ended = true
+		lock.unlock()
+	}
+
+	func connection(_ connection: VNCConnection,
+					credentialFor authenticationType: VNCAuthenticationType,
+					completion: @escaping (VNCCredential?) -> Void) {
+		completion(nil)
+	}
+
+	func connection(_ connection: VNCConnection, didCreateFramebuffer framebuffer: VNCFramebuffer) { }
+	func connection(_ connection: VNCConnection, didResizeFramebuffer framebuffer: VNCFramebuffer) { }
+
+	func connection(_ connection: VNCConnection,
+					didUpdateFramebuffer framebuffer: VNCFramebuffer,
+					x: UInt16, y: UInt16, width: UInt16, height: UInt16) {
+		let framebufferWidth = Int(framebuffer.size.width)
+		let framebufferHeight = Int(framebuffer.size.height)
+		let bytes = framebuffer.surfaceAddress.assumingMemoryBound(to: UInt8.self)
+
+		// The kit's own layout: BGRA, eight bits a component.
+		let pixels = (0..<framebufferWidth * framebufferHeight).map { index in
+			UInt32(bytes[index * 4 + 2]) << 16 | UInt32(bytes[index * 4 + 1]) << 8 | UInt32(bytes[index * 4])
+		}
+
+		lock.lock()
+		drawn.width = framebufferWidth
+		drawn.height = framebufferHeight
+		drawn.pixels = pixels
+		lock.unlock()
+	}
+
+	func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) { }
+}
+
+extension ScriptedServer {
+	/// Connects a VNCConnection at `colorDepth` to the server above, which then sends `messages`,
+	/// and reports what was drawn by the time the script ran out and the connection ended.
+	static func draw(width: UInt16,
+					 height: UInt16,
+					 colorDepth: VNCConnection.Settings.ColorDepth,
+					 messages: [UInt8]) async -> DrawnFramebuffer {
+		let transport = ScriptedTransport(script: serverInit(width: width, height: height) + messages)
+		let watcher = DrawingWatcher()
+
+		let settings = VNCConnection.Settings(isDebugLoggingEnabled: false,
+											  hostname: "scripted.invalid",
+											  port: 5900,
+											  isShared: true,
+											  isScalingEnabled: false,
+											  useDisplayLink: false,
+											  inputMode: .none,
+											  isClipboardRedirectionEnabled: false,
+											  colorDepth: colorDepth,
+											  frameEncodings: [.raw])
+
+		let connection = VNCConnection(settings: settings,
+									   logger: QuietLogger(),
+									   framebufferAllocator: CappedAllocator(limit: 64 * 1024 * 1024),
+									   context: nil)
+
+		connection.transportProvider = { _, _ in transport }
+		connection.delegate = watcher
+		connection.connect()
+
+		let deadline = Date().addingTimeInterval(10)
+
+		while Date() < deadline, !watcher.result.ended {
+			try? await Task.sleep(nanoseconds: 20_000_000)
+		}
+
+		connection.disconnect()
+
+		var drawn = watcher.result.drawn
+
+		if !watcher.result.ended {
+			drawn.ending = "still connected after 10 s"
+		}
+
+		return drawn
+	}
+}
+
 /// A malloc allocator that refuses, and records, anything over `limit` bytes. A test of a size that
 /// should be refused before anything is allocated asks this one, so that should the refusal ever go,
 /// the test fails instead of zeroing up to seventeen gigabytes of whoever runs it.

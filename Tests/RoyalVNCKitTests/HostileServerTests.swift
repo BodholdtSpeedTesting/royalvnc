@@ -227,6 +227,73 @@ final class HostileServerTests: XCTestCase {
 		XCTAssertNil(session.framebuffer.colorMap)
 	}
 
+	/// A whole connection at the kit's 8-bit depth: SetColourMapEntries, then -- the second time --
+	/// a DesktopSize (rfbproto.rst 4054-4066), then a Raw rectangle of pixel values 0 to 3. A
+	/// resize made a framebuffer with no colour map, so the pixels after it were drawn by their bit
+	/// fields -- 000000, 000040, 000080 and 0000c0 here -- not the colours the server had set,
+	/// though only a SetPixelFormat empties the map (rfbproto.rst 1684-1690).
+	func testColourMapOutlivesADesktopSize() async throws {
+		for resize in [false, true] {
+			var messages = ServerStream()
+			messages.u8(1)
+			messages.setColourMapEntries(firstColour: 0, colours: [
+				(0xffff, 0, 0), (0, 0xffff, 0), (0, 0, 0xffff), (0xffff, 0xffff, 0xffff)
+			])
+
+			if resize {
+				messages.u8(0)
+				messages.framebufferUpdateHeader(rectangles: 1)
+				messages.rectangle(x: 0, y: 0, width: 4, height: 2, encoding: -223)
+			}
+
+			messages.u8(0)
+			messages.framebufferUpdateHeader(rectangles: 1)
+			messages.rectangle(x: 0, y: 0, width: 4, height: 1, encoding: 0)
+			messages.append([0, 1, 2, 3])
+
+			let drawn = await ScriptedServer.draw(width: 4, height: 1, colorDepth: .depth8Bit, messages: messages.bytes)
+			let label = resize ? "after a DesktopSize" : "with no resize"
+
+			XCTAssertEqual(drawn.width, 4, label)
+			XCTAssertEqual(drawn.height, resize ? 2 : 1, label)
+			XCTAssertEqual(Array(drawn.pixels.prefix(4)), [0xff_00_00, 0x00_ff_00, 0x00_00_ff, 0xff_ff_ff], label)
+			XCTAssertTrue(drawn.ending.contains("closed"), "\(label): \(drawn.ending)")
+		}
+	}
+
+	/// The map goes with the framebuffer a resize makes -- the connection's own path for a
+	/// DesktopSize or an ExtendedDesktopSize, the framebuffer asking its delegate -- and not with
+	/// one made for a new pixel format: the client's SetPixelFormat empties the map (rfbproto.rst
+	/// 1684-1690).
+	func testColourMapGoesWithAResizeAndNotWithANewPixelFormat() async throws {
+		let (connection, _) = makeTestEncodings()
+
+		connection.recreateFramebuffer(size: .init(width: 4, height: 1), screens: [], pixelFormat: .init(depth: 8))
+
+		let first = try XCTUnwrap(connection.framebuffer)
+
+		var stream = ServerStream()
+		stream.setColourMapEntries(firstColour: 2, colours: [(0xffff, 0, 0)])
+
+		try first.updateColorMap(try await VNCProtocol.SetColourMapEntries.receive(connection: ScriptedReader(stream.bytes),
+																					logger: QuietLogger()))
+
+		first.resize(to: .init(width: 4, height: 2))
+
+		let resized = try XCTUnwrap(connection.framebuffer)
+
+		XCTAssertFalse(resized === first, "the resize made no framebuffer")
+		XCTAssertEqual(resized.size.height, 2)
+		XCTAssertEqual(resized.colorMap?.colorAt(2)?.red, 0xff)
+
+		connection.updateColorDepth(.depth8Bit)
+
+		let reformatted = try XCTUnwrap(connection.framebuffer)
+
+		XCTAssertFalse(reformatted === resized, "the new pixel format made no framebuffer")
+		XCTAssertNil(reformatted.colorMap)
+	}
+
 	// MARK: - Hextile and ZRLE: tiles and subrectangles in Int, inside their tile (7.7.4, 7.7.6)
 
 	/// Four tiles -- 16x16, a narrower last column, a shorter last row -- each a different way:

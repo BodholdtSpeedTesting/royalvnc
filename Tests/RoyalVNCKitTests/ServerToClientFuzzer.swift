@@ -597,6 +597,8 @@ final class FuzzSession: VNCFramebufferDelegate {
 			return
 		}
 
+		replacement.inheritColorMap(from: framebuffer)
+
 		self.framebuffer.delegate = nil
 		replacement.delegate = self
 		self.framebuffer = replacement

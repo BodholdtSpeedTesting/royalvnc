@@ -410,6 +410,16 @@ extension VNCFramebuffer {
 		self.colorMap = colorMap
 	}
 
+	/// Takes the colour map of the framebuffer this one replaces at a resize, which made this one
+	/// with that one's pixel format. Each framebuffer kept its own map, and one made for a new size
+	/// started with none, so after a DesktopSize or an ExtendedDesktopSize an 8-bit session's
+	/// pixels were drawn by their bit fields instead of the colours the server had set, though
+	/// nothing but a SetPixelFormat empties the map (rfbproto.rst, SetPixelFormat, lines
+	/// 1684-1690).
+	func inheritColorMap(from previous: VNCFramebuffer) {
+		colorMap = previous.colorMap
+	}
+
 	func decodeCursor(image: inout Data,
 					  mask: inout Data,
 					  size: VNCSize,

@@ -866,8 +866,9 @@ private extension VNCProtocol.TightEncoding {
         switch imageType {
         case .jpeg:
 #if canImport(JPEG)
-            var stream = TightImageDataStream(data)
-            let image: JPEG.Data.Rectangular<JPEG.Common> = try .decompress(stream: &stream)
+            let image = try decodeJPEG(data,
+                                       width: width,
+                                       height: height)
 
             guard image.size.x == width,
                   image.size.y == height else {
@@ -945,6 +946,146 @@ private extension VNCProtocol.TightEncoding {
 #if !(canImport(ImageIO) && canImport(CoreGraphics))
 #if canImport(JPEG)
 extension VNCProtocol.TightEncoding.TightImageDataStream: JPEG.Bytestream.Source {}
+
+private extension VNCProtocol.TightEncoding {
+    /// A Tight JPEG's image, decoded with swift-jpeg's staged interface so that nothing is made
+    /// for it until its frame header has been checked against the rectangle.
+    ///
+    /// rfbproto.rst's JpegCompression (lines 3505-3533) is the rectangle's pixels as a JPEG, so
+    /// the image is the rectangle's size. swift-jpeg's one-call decompress made the image the
+    /// size its frame header declares -- up to 65535 x 65535 -- and the kit compared that with
+    /// the rectangle only after decoding: a 175-byte update made a Linux viewer allocate
+    /// gigabytes, and be killed. In ITU-T T.81's terms:
+    /// - the frame header's number of lines (Y) and of samples per line (X) (B.2.2) must be the
+    ///   rectangle's height and width before the image is made, and a JPEG with no frame header
+    ///   before its first scan is refused -- as is a Y of zero, which leaves the height to a DNL:
+    ///   decoded without one, swift-jpeg's inverse DCT traps on it;
+    /// - a DNL segment (B.2.5), which defines or redefines Y after the first scan, is refused: Y
+    ///   is the rectangle's height already, and a DNL would make the image taller again;
+    /// - every scan is decoded with `extend: false`, so that entropy-coded data holding more
+    ///   lines than Y is not decoded as more of the image, as swift-jpeg's own decompress allows
+    ///   for a first scan.
+    /// Otherwise the segments are taken in the order and the way swift-jpeg's own decompress takes
+    /// them. What is refused here is refused as invalidData; swift-jpeg's own errors are left to
+    /// the caller, which ends the session with them as frameDecode.
+    static func decodeJPEG(_ data: Data,
+                           width: Int,
+                           height: Int) throws -> JPEG.Data.Rectangular<JPEG.Common> {
+        var stream = TightImageDataStream(data)
+        var marker: (type: JPEG.Marker, data: [UInt8]) = try stream.segment()
+
+        guard case .start = marker.type else {
+            throw VNCError.protocol(.invalidData)
+        }
+
+        var dcTables = [JPEG.Table.HuffmanDC]()
+        var acTables = [JPEG.Table.HuffmanAC]()
+        var quantizationTables = [JPEG.Table.Quantization]()
+        var restartInterval: JPEG.Header.RestartInterval?
+        var frameHeader: JPEG.Header.Frame?
+
+        // Up to the frame header: the tables and restart interval that may come before it.
+        while frameHeader == nil {
+            marker = try stream.segment()
+
+            switch marker.type {
+                case .frame(let process):
+                    frameHeader = try .parse(marker.data, process: process)
+                case .quantization:
+                    quantizationTables += try JPEG.Table.parse(quantization: marker.data)
+                case .huffman:
+                    let tables = try JPEG.Table.parse(huffman: marker.data)
+
+                    dcTables += tables.dc
+                    acTables += tables.ac
+                case .interval:
+                    restartInterval = try .parse(marker.data)
+                case .application, .comment, .arithmeticCodingCondition, .hierarchical, .expandReferenceComponents:
+                    break
+                default:
+                    // Another start of image, an end, a scan, a DNL or a restart before any frame
+                    // header.
+                    throw VNCError.protocol(.invalidData)
+            }
+        }
+
+        guard let frame = frameHeader,
+              frame.size.x == width,
+              frame.size.y == height else {
+            throw VNCError.protocol(.invalidData)
+        }
+
+        // Only now is anything made at the frame's size: the rectangle's, which the update's own
+        // check has kept inside the framebuffer.
+        var context = try JPEG.Context<JPEG.Common>(frame: frame)
+
+        dcTables.forEach { context.push(dc: $0) }
+        acTables.forEach { context.push(ac: $0) }
+
+        for table in quantizationTables {
+            try context.push(quanta: table)
+        }
+
+        if let restartInterval {
+            context.push(interval: restartInterval)
+        }
+
+        marker = try stream.segment()
+
+        while true {
+            switch marker.type {
+                case .scan:
+                    let scan = try JPEG.Header.Scan.parse(marker.data, process: frame.process)
+                    var segments = [[UInt8]]()
+
+                    // The scan's entropy-coded data, one segment per restart interval, up to the
+                    // first marker that is not a restart; the restarts' phases in order.
+                    while true {
+                        let segment: [UInt8]
+
+                        (segment, marker) = try stream.segment(prefix: true)
+                        segments.append(segment)
+
+                        guard case .restart(let phase) = marker.type else {
+                            break
+                        }
+
+                        guard phase == (segments.count - 1) % 8 else {
+                            throw VNCError.protocol(.invalidData)
+                        }
+                    }
+
+                    try context.push(scan: scan,
+                                     ecss: segments,
+                                     extend: false)
+
+                    // `marker` is the one after the scan already.
+                    continue
+                case .quantization:
+                    for table in try JPEG.Table.parse(quantization: marker.data) {
+                        try context.push(quanta: table)
+                    }
+                case .huffman:
+                    let tables = try JPEG.Table.parse(huffman: marker.data)
+
+                    tables.dc.forEach { context.push(dc: $0) }
+                    tables.ac.forEach { context.push(ac: $0) }
+                case .interval:
+                    context.push(interval: try .parse(marker.data))
+                case .end:
+                    return context.spectral.idct().interleaved()
+                case .application, .comment, .arithmeticCodingCondition, .hierarchical, .expandReferenceComponents:
+                    break
+                default:
+                    // A DNL, a second frame header, another start of image, or a restart outside
+                    // a scan.
+                    throw VNCError.protocol(.invalidData)
+            }
+
+            marker = try stream.segment()
+        }
+    }
+}
 #endif
 
 #if canImport(PNG)

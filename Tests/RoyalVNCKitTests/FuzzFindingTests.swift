@@ -532,6 +532,69 @@ final class FuzzFindingTests: XCTestCase {
 		}
 	}
 
+	/// The restart-segment guard's legal edge. Every entropy-coded segment of a scan but the last
+	/// holds the restart interval's Ri MCUs, and "The last one shall contain whatever number of MCUs
+	/// completes the scan" (T.81 B.2.1): fewer than Ri, or a single one. The guard refuses only a
+	/// segment that begins at or past the end of the scan's grid, so each of these conformant JPEGs,
+	/// its intervals whole rows as swift-jpeg decodes them, is drawn: (a) one component, 16 x 24, its
+	/// 2 x 3 data units in intervals of two rows, the last of them one row; (b) the same frame as one
+	/// interleaved scan of three components sampled 1 x 1 (A.2.3), its 2 x 3 MCUs so divided; (c) one
+	/// component, 8 x 16, one data unit wide, in intervals of one unit, the last beginning at its last
+	/// unit; and (d) (a)'s grid in a progressive frame, a DC first scan and then an AC first scan
+	/// (G.1.1.1.1) so divided. A guard rewritten to refuse a partial last interval (segments x
+	/// interval <= units) refuses (a), (b) and (d), and one a unit tighter (the last segment's first
+	/// unit before the grid's last, so never a last interval of one MCU) refuses (c); each passed
+	/// every other test (review round 4). (ImageIO, on Apple's platforms, draws all four too; the
+	/// guard is on the swift-jpeg path alone.)
+	func testTightJPEGWhoseLastRestartIntervalIsPartialOrOneUnitIsDrawn() async throws {
+		try skipWhereImageIODecodesJPEGs()
+
+		// (a) Six blocks, two bits a block in a sequential scan: a DRI of four (two rows), then four
+		// blocks, RST0, and two.
+		var oneComponent = Self.jpeg(width: 16, height: 24, scan: [])
+
+		oneComponent.insert(contentsOf: Self.restartInterval(4), at: oneComponent.count - 2 - 10)
+		oneComponent.insert(contentsOf: Self.blocks(4) + [0xff, 0xd0] + Self.blocks(2), at: oneComponent.count - 2)
+
+		await assertDrawnMidGrey(width: 16, height: 24, jpeg: oneComponent,
+								 label: "one component, 16 x 24, its last restart interval one row of two")
+
+		// (b) Six MCUs of three blocks: four MCUs, RST0, and two.
+		var interleaved = Self.jpeg(width: 16, height: 24, components: 3, scan: [])
+
+		interleaved.insert(contentsOf: Self.restartInterval(4), at: interleaved.count - 2 - 14)
+		interleaved.insert(contentsOf: Self.blocks(12) + [0xff, 0xd0] + Self.blocks(6), at: interleaved.count - 2)
+
+		await assertDrawnMidGrey(width: 16, height: 24, jpeg: interleaved,
+								 label: "an interleaved scan, 16 x 24, its last restart interval one row of two")
+
+		// (c) Two blocks in a column: a DRI of one, then a block, RST0, and a block.
+		var oneWide = Self.jpeg(width: 8, height: 16, scan: [])
+
+		oneWide.insert(contentsOf: Self.restartInterval(1), at: oneWide.count - 2 - 10)
+		oneWide.insert(contentsOf: Self.restartSegments(Self.blocks(1), count: 2), at: oneWide.count - 2)
+
+		await assertDrawnMidGrey(width: 8, height: 16, jpeg: oneWide,
+								 label: "one component, 8 x 16, one data unit wide, a restart interval of one unit")
+
+		// (d) Progressive (SOF2), one component, 16 x 24: a DC first scan, a bit a block; then a DRI of
+		// four and an AC first scan (band 1-63), an end of block a block: four blocks, RST0, and two.
+		var progressive: [UInt8] = [0xff, 0xd8]
+
+		progressive += Self.segment(0xdb, [0x00] + [UInt8](repeating: 1, count: 64))
+		progressive += Self.segment(0xc2, [0x08, 0x00, 0x18, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00])
+		progressive += Self.segment(0xc4, [0x00, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+		progressive += Self.segment(0xc4, [0x10, 0x01] + [UInt8](repeating: 0, count: 15) + [0x00])
+		progressive += Self.scanHeader([1], ss: 0, se: 0) + Self.blocks(6, bitsEach: 1)
+		progressive += Self.restartInterval(4)
+		progressive += Self.scanHeader([1], ss: 1, se: 63)
+			+ Self.blocks(4, bitsEach: 1) + [0xff, 0xd0] + Self.blocks(2, bitsEach: 1)
+		progressive += [0xff, 0xd9]
+
+		await assertDrawnMidGrey(width: 16, height: 24, jpeg: progressive,
+								 label: "a progressive AC scan, 16 x 24, its last restart interval one row of two")
+	}
+
 	/// A DNL segment (T.81 B.2.5) of zero lines. a8d3f92 refuses every DNL before swift-jpeg parses
 	/// it, which keeps this from reaching swift-jpeg's DNL parser: that parser traps on a DNL of
 	/// zero lines (HeightRedefinition's "height must be positive"; T.81 Table B.10 gives NL as 1 to

@@ -535,17 +535,21 @@ final class FuzzFindingTests: XCTestCase {
 	/// The restart-segment guard's legal edge. Every entropy-coded segment of a scan but the last
 	/// holds the restart interval's Ri MCUs, and "The last one shall contain whatever number of MCUs
 	/// completes the scan" (T.81 B.2.1): fewer than Ri, or a single one. The guard refuses only a
-	/// segment that begins at or past the end of the scan's grid, so each of these conformant JPEGs,
-	/// its intervals whole rows as swift-jpeg decodes them, is drawn: (a) one component, 16 x 24, its
-	/// 2 x 3 data units in intervals of two rows, the last of them one row; (b) the same frame as one
-	/// interleaved scan of three components sampled 1 x 1 (A.2.3), its 2 x 3 MCUs so divided; (c) one
-	/// component, 8 x 16, one data unit wide, in intervals of one unit, the last beginning at its last
-	/// unit; and (d) (a)'s grid in a progressive frame, a DC first scan and then an AC first scan
-	/// (G.1.1.1.1) so divided. A guard rewritten to refuse a partial last interval (segments x
-	/// interval <= units) refuses (a), (b) and (d), and one a unit tighter (the last segment's first
-	/// unit before the grid's last, so never a last interval of one MCU) refuses (c); each passed
-	/// every other test (review round 4). (ImageIO, on Apple's platforms, draws all four too; the
-	/// guard is on the swift-jpeg path alone.)
+	/// segment that begins at or past the end of the scan's grid -- a one-component scan's data
+	/// units, an interleaved scan's MCUs -- so each of these conformant JPEGs, its intervals whole
+	/// rows as swift-jpeg decodes them, is drawn: (a) one component, 16 x 24, its 2 x 3 data units in
+	/// intervals of two rows, the last of them one row; (b) the same frame as one interleaved scan of
+	/// three components sampled 1 x 1 (A.2.3), its 2 x 3 MCUs so divided; (c) one component, 8 x 16,
+	/// one data unit wide, in intervals of one unit, the last beginning at its last unit; (d) (a)'s
+	/// grid in a progressive frame, a DC first scan and then an AC first scan (G.1.1.1.1) so divided;
+	/// and (e) (c)'s frame as one interleaved scan of three components sampled 1 x 1, its 1 x 2 MCUs
+	/// in intervals of one MCU, the last beginning at its last MCU. A guard rewritten to refuse a
+	/// partial last interval (segments x interval <= units) refuses (a), (b) and (d). One a unit
+	/// tighter (the last segment's first unit before the grid's last, so never a last interval of one
+	/// MCU) refuses (c) and (e); one a unit tighter for interleaved scans alone refuses (e), and for
+	/// one-component scans alone, (c). The first two passed every test at c0db80a (review round 4),
+	/// and the interleaved-only one every test at 3920245, (a) to (d) among them. (ImageIO, on
+	/// Apple's platforms, draws all five too; the guard is on the swift-jpeg path alone.)
 	func testTightJPEGWhoseLastRestartIntervalIsPartialOrOneUnitIsDrawn() async throws {
 		try skipWhereImageIODecodesJPEGs()
 
@@ -593,6 +597,16 @@ final class FuzzFindingTests: XCTestCase {
 
 		await assertDrawnMidGrey(width: 16, height: 24, jpeg: progressive,
 								 label: "a progressive AC scan, 16 x 24, its last restart interval one row of two")
+
+		// (e) Interleaved and one MCU wide: 8 x 16, three components sampled 1 x 1, its 1 x 2 MCUs of three
+		// blocks in intervals of one MCU (a row), the last beginning at the grid's last MCU.
+		var interleavedOneWide = Self.jpeg(width: 8, height: 16, components: 3, scan: [])
+
+		interleavedOneWide.insert(contentsOf: Self.restartInterval(1), at: interleavedOneWide.count - 2 - 14)
+		interleavedOneWide.insert(contentsOf: Self.restartSegments(Self.blocks(3), count: 2), at: interleavedOneWide.count - 2)
+
+		await assertDrawnMidGrey(width: 8, height: 16, jpeg: interleavedOneWide,
+								 label: "an interleaved scan, 8 x 16, one MCU wide, a restart interval of one MCU")
 	}
 
 	/// A DNL segment (T.81 B.2.5) of zero lines. a8d3f92 refuses every DNL before swift-jpeg parses

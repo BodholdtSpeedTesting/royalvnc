@@ -25,8 +25,12 @@ import Dispatch
 ///
 /// A read of a block or more, with nothing waiting, goes straight to the
 /// transport, as every read used to: there is no field to save a receive on, and
-/// a payload of megabytes -- a ZRLE rectangle's zlib data is one read -- would
-/// otherwise be copied twice and leave a buffer that size behind.
+/// a single read that large -- a cursor image, ServerCutText's text, each read
+/// whole -- would otherwise be copied through the buffer and leave a buffer that
+/// size behind. A frame's payload is not such a read: Raw, Zlib, ZRLE (through
+/// Zlib's) and Tight read theirs 16 KiB at a time (`RawEncoding`,
+/// `ZlibEncoding.retrieveCompressedData`, `TightEncoding.readBuffered`), under a
+/// block, so those are served from the buffer like any field.
 ///
 /// A transport of its own rather than a part of `TransportNetworkConnection`, so
 /// that whatever takes the stream over keeps the bytes already read from it:
@@ -60,15 +64,21 @@ final class BufferedTransport: VNCTransport {
 
 	func startTransport(queue: DispatchQueue) { base.startTransport(queue: queue) }
 
-	/// Drops what was read ahead, then cancels the transport.
+	/// Drops what was read ahead, and whatever the transport hands back from now
+	/// on, then cancels the transport.
 	///
 	/// The kit looks for a disconnect between messages, and a message can be
 	/// megabytes, so its decoders read on after a cancel until a read fails. A
 	/// read of the transport fails at once after a cancel, as each field's read
 	/// did when it was one; a block read ahead would otherwise go on being
-	/// decoded, and drawn, for up to 64 KiB after the connection was ended.
+	/// decoded, and drawn, for up to 64 KiB after the connection was ended. So
+	/// would a block that a read already in flight brings back after the cancel
+	/// -- an NWConnection completion already on its way, a `recv` that had
+	/// returned -- were it kept: it is refused, and that read fails too, as a read
+	/// whose answer came after the cancel. Every read after the cancel goes to the
+	/// transport, which reports its own end.
 	func cancelTransport() {
-		received.removeAll()
+		received.close()
 		base.cancelTransport()
 	}
 
@@ -83,19 +93,30 @@ final class BufferedTransport: VNCTransport {
 			let block = try await readBlock(maximumLength: maximumLength)
 
 			if block.count >= wanted, block.count <= maximumLength {
+				// Handed straight back, so not through `received`: checked here
+				// instead for an answer that came after the cancel.
+				guard !received.isClosed else {
+					throw VNCError.connection(.cancelled)
+				}
+
 				return block
 			}
 
-			received.append(block)
+			guard received.append(block) else {
+				throw VNCError.connection(.cancelled)
+			}
 		}
 
 		while received.count < wanted {
-			received.append(try await readBlock(maximumLength: ReceivedBytes.chunkSize))
+			guard received.append(try await readBlock(maximumLength: ReceivedBytes.chunkSize)) else {
+				throw VNCError.connection(.cancelled)
+			}
 		}
 
 		guard let data = received.take(minimumLength: wanted,
 									   maximumLength: maximumLength) else {
-			throw VNCError.protocol(.invalidData)
+			// Emptied between the append and the take: cancelled meanwhile.
+			throw received.isClosed ? VNCError.connection(.cancelled) : VNCError.protocol(.invalidData)
 		}
 
 		return data

@@ -118,6 +118,111 @@ final class BlockReadTests: XCTestCase {
 					   "the TLS layer's transport began with \(handedOn.bytes.map { "\($0.count) other bytes" } ?? "nothing it could read")")
 	}
 
+	/// A connection given no transport -- the Apple app's direct connections, and viewer-probe --
+	/// dials one of its own (`TransportNetworkConnection(settings:)`): an NWConnection on Apple
+	/// platforms, the socket connection elsewhere. That is the path the slow first frame was
+	/// measured on, and its reads are served in blocks as a supplied transport's are. The other
+	/// tests here hand theirs over through `transportProvider`, so a dialled transport put in place
+	/// unbuffered, as at d360fe0, passed them all. Nothing is started, so nothing is dialled.
+	func testADialledConnectionIsReadThroughTheBuffer() {
+		let connection = VNCConnection(settings: Self.settings(colorDepth: .depth24Bit),
+									   logger: QuietLogger(),
+									   framebufferAllocator: CappedAllocator(limit: 1024 * 1024),
+									   context: nil)
+
+		let transport = connection.connection.transport
+
+		guard let buffered = transport as? BufferedTransport else {
+			return XCTFail("the dialled transport is \(type(of: transport)), not behind the buffer")
+		}
+
+#if canImport(Network)
+		XCTAssertTrue(buffered.base is NWConnectionTransport, "the buffer holds \(type(of: buffered.base))")
+#else
+		XCTAssertTrue(buffered.base is SocketConnectionTransport, "the buffer holds \(type(of: buffered.base))")
+#endif
+	}
+
+	/// The transport a TLS upgrade puts in place is read in blocks too. VeNCrypt X509None, as above;
+	/// the provider hands back a transport carrying the rest of the stream: the SecurityResult,
+	/// ServerInit (RFC 6143 7.1.3, 7.3.2) and a 320x256 checkerboard as one Hextile rectangle, its
+	/// 320 tiles each a background, a foreground and 128 one-pixel subrectangles (7.7.4). A
+	/// `replaceTransport` that put the upgrade in place unbuffered read it a field at a time --
+	/// 83,225 reads, measured at 1d50ace's review -- and every other test passed.
+	func testATransportPutInPlaceByATLSUpgradeIsReadInBlocks() async throws {
+		let width = 320
+		let height = 256
+		let image = (0..<width * height).map { index in
+			(index % width + index / width) % 2 == 0 ? Self.dark : Self.light
+		}
+
+		var plain = ServerStream()
+		plain.append(Array("RFB 003.008\n".utf8))
+		plain.u8(1)         // number-of-security-types
+		plain.u8(19)        // VeNCrypt
+		plain.u8(0)         // its version: 0.2
+		plain.u8(2)
+		plain.u8(0)         // the version ack: success
+		plain.u8(1)         // one subtype
+		plain.u32(260)      // X509None
+		plain.u8(1)         // the subtype ack: success
+
+		// What the TLS layer would carry: the rest of `ScriptedServer.serverInit`'s stream.
+		var messages = ServerStream()
+		messages.u32(0)     // SecurityResult: OK
+		messages.u16(UInt16(width))
+		messages.u16(UInt16(height))
+		messages.append([32, 24, 0, 1]) // bits-per-pixel, depth, big-endian, true-colour
+		messages.u16(255); messages.u16(255); messages.u16(255)
+		messages.append([16, 8, 0, 0, 0, 0]) // shifts, padding
+		messages.u32(4)
+		messages.append(Array("test".utf8))
+		messages.u8(0) // FramebufferUpdate
+		messages.framebufferUpdateHeader(rectangles: 1)
+		messages.rectangle(x: 0, y: 0, width: UInt16(width), height: UInt16(height), encoding: 5)
+
+		let subrectangles = Self.hextile(image, width: width, height: height, into: &messages)
+
+		let plainTransport = ScriptedTransport(script: plain.bytes)
+		let upgraded = ScriptedTransport(script: messages.bytes)
+		let watcher = DrawingWatcher()
+
+		let connection = VNCConnection(settings: Self.settings(colorDepth: .depth24Bit),
+									   logger: QuietLogger(),
+									   framebufferAllocator: CappedAllocator(limit: 64 * 1024 * 1024),
+									   context: nil)
+
+		connection.transportProvider = { _, _ in plainTransport }
+		connection.tlsUpgradeProvider = { _, _ in upgraded }
+		connection.delegate = watcher
+		connection.connect()
+
+		let deadline = Date().addingTimeInterval(120)
+
+		while Date() < deadline, !watcher.result.ended {
+			try? await Task.sleep(nanoseconds: 20_000_000)
+		}
+
+		connection.disconnect()
+
+		let drawn = watcher.result.drawn
+		let differing = (0..<min(drawn.pixels.count, image.count)).filter { drawn.pixels[$0] != image[$0] }
+
+		XCTAssertTrue(drawn.ending.contains("closed"), "the session ended otherwise: \(drawn.ending)")
+		XCTAssertEqual(subrectangles, 320 * 128)
+		XCTAssertEqual(drawn.pixels.count, image.count)
+		XCTAssertEqual(differing.count, 0,
+					   "\(differing.count) pixels differ, the first at \(differing.first.map { "(\($0 % width), \($0 / width))" } ?? "-")")
+
+		let block = 64 * 1024
+		let reads = upgraded.readCount
+
+		XCTAssertLessThanOrEqual(reads, messages.bytes.count / block + 2, """
+			\(reads) reads of the transport the upgrade put in place, for \(messages.bytes.count) bytes \
+			holding \(subrectangles) subrectangles: it should be read in blocks of up to \(block) bytes
+			""")
+	}
+
 	// MARK: - The frame
 
 	/// Two-colour noise, row by row, from a fixed seed: SplitMix64, a public-domain generator; any

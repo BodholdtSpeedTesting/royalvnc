@@ -11,8 +11,8 @@
 // (Network.framework's connection.h, nw_connection_receive_completion_t) says the caller "should
 // process all content it receives".
 //
-// Each test plays the server on a loopback socket of its own, sends what it sends and its FIN, and
-// lets both arrive before the client reads.
+// Each test plays the server on a loopback socket of its own, sends what it sends and its FIN (one
+// test a reset in its place), and lets both arrive before the client reads.
 
 #if canImport(Network)
 import Foundation
@@ -85,6 +85,63 @@ final class NWConnectionEndTests: XCTestCase {
 				// Network.framework's own answer to a receive after the end is POSIX 96, ENODATA, "No
 				// message available on STREAM": the close is the kit's to remember.
 				XCTFail("\(attempt) failed with \(error), not as a closed connection")
+			}
+		}
+	}
+
+	/// The same rule for a reset: the bytes that arrive with it are read, and the reset is the next
+	/// read's to report, and the one's after it. A server that closes with what the client sent
+	/// still unread ends the connection with a reset rather than a FIN, and Network.framework
+	/// hands a receive made once both are in the bytes and the error in one completion -- the
+	/// case connection.h's note on the receive completion's content is about: "the content may be
+	/// non-NULL even in the case of an error". The first connection below witnesses that this setup
+	/// does produce such a completion. d360fe0 threw the error before it looked at the content, and
+	/// so did 1d50ace's read with the error put first again, which every other test passed.
+	func testBytesThatArriveWithAResetAreReadAndTheResetIsTheNextRead() async throws {
+		let sent = Self.reasonBytes
+
+		let witness = try await LoopbackPeer.connected()
+		witness.peer.sendThenReset(sent)
+
+		try await Task.sleep(nanoseconds: 100_000_000)
+
+		let completion = await witness.connection.receiveOnce(maximumLength: 64 * 1024)
+
+		witness.connection.cancel()
+
+		XCTAssertEqual(completion.count, sent.count, "the witness's receive brought \(completion)")
+		XCTAssertNotNil(completion.error,
+						"this setup no longer brings the content and the reset together (\(completion)); the test needs another way to")
+
+		let (peer, connection) = try await LoopbackPeer.connected()
+		let transport = NWConnectionTransport(connection)
+
+		defer { transport.cancelTransport() }
+
+		peer.sendThenReset(sent)
+
+		try await Task.sleep(nanoseconds: 100_000_000)
+
+		do {
+			let read = try await transport.readTransport(minimumLength: 1, maximumLength: 64 * 1024)
+
+			XCTAssertEqual(read, Data(sent))
+		} catch {
+			return XCTFail("the first read failed with \(error): the \(sent.count) bytes before the reset were lost")
+		}
+
+		for attempt in ["the next read", "the read after it"] {
+			do {
+				let more = try await transport.readTransport(minimumLength: 1, maximumLength: 64 * 1024)
+
+				XCTFail("\(attempt) was handed \(more.count) bytes after the reset")
+			} catch let error as NWError {
+				guard case .posix(.ECONNRESET) = error else {
+					XCTFail("\(attempt) failed with \(error), not as the reset")
+					continue
+				}
+			} catch {
+				XCTFail("\(attempt) failed with \(error), not as the reset")
 			}
 		}
 	}
@@ -330,6 +387,19 @@ private final class LoopbackPeer: @unchecked Sendable {
 		if thenClose {
 			shutdown(accepted, SHUT_WR)
 		}
+	}
+
+	/// Sends `bytes`, then ends the connection with a reset: SO_LINGER on with a time of zero, then
+	/// the close.
+	func sendThenReset(_ bytes: [UInt8]) {
+		send(bytes, thenClose: false)
+
+		var linger = Darwin.linger(l_onoff: 1, l_linger: 0)
+
+		setsockopt(accepted, SOL_SOCKET, SO_LINGER, &linger, socklen_t(MemoryLayout<Darwin.linger>.size))
+		close(accepted)
+
+		accepted = -1
 	}
 }
 

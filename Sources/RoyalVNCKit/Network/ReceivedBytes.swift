@@ -25,12 +25,21 @@ final class ReceivedBytes: @unchecked Sendable {
 
     private var bytes = [UInt8]()
     private var offset = 0
+    private var closed = false
 
     var count: Int {
         lock.lock()
         defer { lock.unlock() }
 
         return bytes.count - offset
+    }
+
+    /// Whether `close()` has been called.
+    var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        return closed
     }
 
     func append(_ more: ArraySlice<UInt8>) {
@@ -40,18 +49,29 @@ final class ReceivedBytes: @unchecked Sendable {
         bytes.append(contentsOf: more)
     }
 
-    func append(_ more: Data) {
+    /// Appends `more` and returns true, or, once `close()` has been called,
+    /// drops it and returns false. The check and the append are one step under
+    /// the lock, so no window is left in which a close could come between them
+    /// and what came after the close be taken.
+    func append(_ more: Data) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+
+        guard !closed else {
+            return false
+        }
 
         bytes.append(contentsOf: more)
+
+        return true
     }
 
-    /// Drops whatever is waiting.
-    func removeAll() {
+    /// Drops whatever is waiting, and everything appended from now on.
+    func close() {
         lock.lock()
         defer { lock.unlock() }
 
+        closed = true
         bytes.removeAll()
         offset = 0
     }

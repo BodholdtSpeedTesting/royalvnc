@@ -1,6 +1,6 @@
 // What `BufferedTransport` asks of the transport under it, and what it keeps from it, read by
-// read: the block it asks for, a large read passed straight through, and nothing read ahead
-// served once the transport has been cancelled.
+// read: the block it asks for, a large read passed straight through, and, once the transport has
+// been cancelled, nothing served that was read ahead or that the transport answered after it.
 
 import Foundation
 import XCTest
@@ -83,6 +83,72 @@ final class BufferedTransportTests: XCTestCase {
 		}
 	}
 
+	/// A read of the transport already in flight when it is cancelled can still be answered -- an
+	/// NWConnection completion already on its way, a `recv` that had returned -- and nothing that
+	/// answer brings is served: not to the read in flight, nor to any read made after the cancel.
+	/// At 1d50ace the cancel emptied the buffer and the answer refilled it: the read in flight was
+	/// handed a byte of it, and 65,535 one-byte reads made after the cancel the rest.
+	func testABlockThatComesBackAfterTheCancelIsNotServed() async throws {
+		let base = AnsweredAtCancelTransport(answer: Data(repeating: 0xab, count: 64 * 1024))
+		let buffered = BufferedTransport(base)
+
+		let inFlight = Task { try await buffered.readTransport(minimumLength: 1, maximumLength: 1) }
+
+		while base.askedCount == 0 {
+			try await Task.sleep(nanoseconds: 1_000_000)
+		}
+
+		buffered.cancelTransport()
+
+		if case .success(let data) = await inFlight.result {
+			XCTFail("the read in flight at the cancel was handed \(Array(data)), from an answer that came after it")
+		}
+
+		var servedAfterTheCancel = 0
+
+		// Bounded: past a block, nothing more could have come from the answer.
+		while servedAfterTheCancel <= 70_000 {
+			do {
+				_ = try await buffered.readTransport(minimumLength: 1, maximumLength: 1)
+
+				servedAfterTheCancel += 1
+			} catch {
+				break
+			}
+		}
+
+		XCTAssertEqual(servedAfterTheCancel, 0,
+					   "\(servedAfterTheCancel) one-byte reads made after the cancel were served from an answer that came after it")
+	}
+
+	/// The same for a read of a block or more, which is handed straight back rather than kept: an
+	/// answer that came after the cancel is not handed to it. At 1d50ace it was, all 200 KiB.
+	func testAReadPassedStraightThroughIsNotHandedAnAnswerThatCameAfterTheCancel() async throws {
+		let length = 200 * 1024
+		let base = AnsweredAtCancelTransport(answer: Data(repeating: 0xab, count: length))
+		let buffered = BufferedTransport(base)
+
+		let inFlight = Task { try await buffered.readTransport(minimumLength: 1, maximumLength: length) }
+
+		while base.askedCount == 0 {
+			try await Task.sleep(nanoseconds: 1_000_000)
+		}
+
+		// The precondition: the read went straight through, asking for its own maximum.
+		XCTAssertEqual(base.askedMaximum, length)
+
+		buffered.cancelTransport()
+
+		switch await inFlight.result {
+		case .success(let data):
+			XCTFail("the read in flight at the cancel was handed \(data.count) bytes that came after it")
+		case .failure(let error):
+			guard case .connection(.cancelled) = error as? VNCError else {
+				return XCTFail("the read in flight failed with \(error), not as cancelled")
+			}
+		}
+	}
+
 	/// A transport that hands back no bytes for a read with a minimum of one has broken its
 	/// contract; asking it again would spin, so the read fails.
 	func testATransportThatHandsBackNothingFailsTheRead() async throws {
@@ -154,6 +220,71 @@ private final class RecordingTransport: VNCTransport, @unchecked Sendable {
 		offset += count
 
 		return chunk
+	}
+
+	func writeTransport(data: Data) async throws { }
+}
+
+/// A transport whose first read is answered only when it is cancelled, with `answer`: the answer
+/// already on its way when the cancel came. Every other read fails, as a closed transport's does.
+private final class AnsweredAtCancelTransport: VNCTransport, @unchecked Sendable {
+	private let lock = NSLock()
+	private let answer: Data
+	private var cancelled = false
+	private var asked = [Int]()
+	private var waiting: CheckedContinuation<Data, Error>?
+
+	init(answer: Data) {
+		self.answer = answer
+	}
+
+	/// How many reads have been made of this transport.
+	var askedCount: Int {
+		lock.lock()
+		defer { lock.unlock() }
+
+		return asked.count
+	}
+
+	/// The maximum the first read asked for.
+	var askedMaximum: Int? {
+		lock.lock()
+		defer { lock.unlock() }
+
+		return asked.first
+	}
+
+	var isTransportReady: Bool { true }
+	var transportState: VNCTransportState { .ready }
+
+	func setTransportStateHandler(_ handler: VNCTransportStateHandler?) { }
+	func startTransport(queue: DispatchQueue) { }
+
+	func cancelTransport() {
+		lock.lock()
+		cancelled = true
+		let pending = waiting
+		waiting = nil
+		lock.unlock()
+
+		pending?.resume(returning: answer)
+	}
+
+	func readTransport(minimumLength: Int, maximumLength: Int) async throws -> Data {
+		try await withCheckedThrowingContinuation { continuation in
+			lock.lock()
+			asked.append(maximumLength)
+
+			if !cancelled, asked.count == 1 {
+				waiting = continuation
+				lock.unlock()
+
+				return
+			}
+
+			lock.unlock()
+			continuation.resume(throwing: VNCError.connection(.closed))
+		}
 	}
 
 	func writeTransport(data: Data) async throws { }

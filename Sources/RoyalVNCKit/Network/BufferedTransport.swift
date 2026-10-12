@@ -69,14 +69,20 @@ final class BufferedTransport: VNCTransport {
 	///
 	/// The kit looks for a disconnect between messages, and a message can be
 	/// megabytes, so its decoders read on after a cancel until a read fails. A
-	/// read of the transport fails at once after a cancel, as each field's read
+	/// read of an NWConnection fails at once after a cancel, as each field's read
 	/// did when it was one; a block read ahead would otherwise go on being
 	/// decoded, and drawn, for up to 64 KiB after the connection was ended. So
 	/// would a block that a read already in flight brings back after the cancel
 	/// -- an NWConnection completion already on its way, a `recv` that had
 	/// returned -- were it kept: it is refused, and that read fails too, as a read
-	/// whose answer came after the cancel. Every read after the cancel goes to the
-	/// transport, which reports its own end.
+	/// whose answer came after the cancel. The buffer is closed before the
+	/// transport is cancelled, so an answer that lands while the transport is
+	/// being cancelled is refused as well.
+	///
+	/// Every read after the cancel goes to the transport. An NWConnection fails
+	/// it at once. The socket connection (Linux, Windows) does nothing on a
+	/// cancel, so a read of it waits in `recv` until the server sends, which is
+	/// refused, or closes.
 	func cancelTransport() {
 		received.close()
 		base.cancelTransport()

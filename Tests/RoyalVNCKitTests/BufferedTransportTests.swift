@@ -1,6 +1,7 @@
 // What `BufferedTransport` asks of the transport under it, and what it keeps from it, read by
 // read: the block it asks for, a large read passed straight through, and, once the transport has
-// been cancelled, nothing served that was read ahead or that the transport answered after it.
+// been cancelled, nothing served that was read ahead or that the transport answered after it,
+// an answer that lands while the transport is being cancelled included.
 
 import Foundation
 import XCTest
@@ -88,17 +89,28 @@ final class BufferedTransportTests: XCTestCase {
 	/// answer brings is served: not to the read in flight, nor to any read made after the cancel.
 	/// At 1d50ace the cancel emptied the buffer and the answer refilled it: the read in flight was
 	/// handed a byte of it, and 65,535 one-byte reads made after the cancel the rest.
+	///
+	/// The answer lands while the transport is still being cancelled, so this fails too if the
+	/// buffer is closed after the transport is cancelled rather than before: the read in flight is
+	/// handed a byte of it.
 	func testABlockThatComesBackAfterTheCancelIsNotServed() async throws {
 		let base = AnsweredAtCancelTransport(answer: Data(repeating: 0xab, count: 64 * 1024))
 		let buffered = BufferedTransport(base)
 
-		let inFlight = Task { try await buffered.readTransport(minimumLength: 1, maximumLength: 1) }
+		let inFlight = Task {
+			defer { base.answerTakenUp.signal() }
+
+			return try await buffered.readTransport(minimumLength: 1, maximumLength: 1)
+		}
 
 		while base.askedCount == 0 {
 			try await Task.sleep(nanoseconds: 1_000_000)
 		}
 
-		buffered.cancelTransport()
+		await cancelOnAThreadOfItsOwn(buffered)
+
+		XCTAssertEqual(base.answerLandedDuringTheCancel, true,
+					   "the read in flight was not done with the answer before the cancel returned, so the order was not tested")
 
 		if case .success(let data) = await inFlight.result {
 			XCTFail("the read in flight at the cancel was handed \(Array(data)), from an answer that came after it")
@@ -122,13 +134,18 @@ final class BufferedTransportTests: XCTestCase {
 	}
 
 	/// The same for a read of a block or more, which is handed straight back rather than kept: an
-	/// answer that came after the cancel is not handed to it. At 1d50ace it was, all 200 KiB.
+	/// answer that came after the cancel is not handed to it. At 1d50ace it was, all 200 KiB, and
+	/// it is again if the buffer is closed after the transport is cancelled rather than before.
 	func testAReadPassedStraightThroughIsNotHandedAnAnswerThatCameAfterTheCancel() async throws {
 		let length = 200 * 1024
 		let base = AnsweredAtCancelTransport(answer: Data(repeating: 0xab, count: length))
 		let buffered = BufferedTransport(base)
 
-		let inFlight = Task { try await buffered.readTransport(minimumLength: 1, maximumLength: length) }
+		let inFlight = Task {
+			defer { base.answerTakenUp.signal() }
+
+			return try await buffered.readTransport(minimumLength: 1, maximumLength: length)
+		}
 
 		while base.askedCount == 0 {
 			try await Task.sleep(nanoseconds: 1_000_000)
@@ -137,7 +154,10 @@ final class BufferedTransportTests: XCTestCase {
 		// The precondition: the read went straight through, asking for its own maximum.
 		XCTAssertEqual(base.askedMaximum, length)
 
-		buffered.cancelTransport()
+		await cancelOnAThreadOfItsOwn(buffered)
+
+		XCTAssertEqual(base.answerLandedDuringTheCancel, true,
+					   "the read in flight was not done with the answer before the cancel returned, so the order was not tested")
 
 		switch await inFlight.result {
 		case .success(let data):
@@ -161,6 +181,19 @@ final class BufferedTransportTests: XCTestCase {
 		} catch let error as VNCError {
 			guard case .protocol(.invalidData) = error else {
 				return XCTFail("the read failed with \(error)")
+			}
+		}
+	}
+
+	/// Cancels `transport` on a thread of its own and returns once the cancel has. Not on the
+	/// test's own thread, which is one of Swift's task pool: `AnsweredAtCancelTransport`'s cancel
+	/// waits for the read in flight, which runs on that pool, and a pool of one thread would have
+	/// none left to run it on.
+	private func cancelOnAThreadOfItsOwn(_ transport: BufferedTransport) async {
+		await withCheckedContinuation { (cancelled: CheckedContinuation<Void, Never>) in
+			Thread.detachNewThread {
+				transport.cancelTransport()
+				cancelled.resume()
 			}
 		}
 	}
@@ -227,12 +260,21 @@ private final class RecordingTransport: VNCTransport, @unchecked Sendable {
 
 /// A transport whose first read is answered only when it is cancelled, with `answer`: the answer
 /// already on its way when the cancel came. Every other read fails, as a closed transport's does.
+///
+/// Its cancel does not return until the read in flight is done with the answer, handed it or
+/// refused it (`answerTakenUp`, which that read's task signals; five seconds at most). So the
+/// answer lands while the transport is still being cancelled, as an NWConnection completion
+/// already on its way can, and it is refused only if the buffer was closed first.
 private final class AnsweredAtCancelTransport: VNCTransport, @unchecked Sendable {
 	private let lock = NSLock()
 	private let answer: Data
 	private var cancelled = false
 	private var asked = [Int]()
 	private var waiting: CheckedContinuation<Data, Error>?
+	private var landedDuringTheCancel: Bool?
+
+	/// Signalled by the task of the read in flight once that read is done with the answer.
+	let answerTakenUp = DispatchSemaphore(value: 0)
 
 	init(answer: Data) {
 		self.answer = answer
@@ -244,6 +286,15 @@ private final class AnsweredAtCancelTransport: VNCTransport, @unchecked Sendable
 		defer { lock.unlock() }
 
 		return asked.count
+	}
+
+	/// Whether the read in flight was done with the answer before the cancel returned: `nil` if no
+	/// read was waiting when the cancel came.
+	var answerLandedDuringTheCancel: Bool? {
+		lock.lock()
+		defer { lock.unlock() }
+
+		return landedDuringTheCancel
 	}
 
 	/// The maximum the first read asked for.
@@ -267,7 +318,17 @@ private final class AnsweredAtCancelTransport: VNCTransport, @unchecked Sendable
 		waiting = nil
 		lock.unlock()
 
-		pending?.resume(returning: answer)
+		guard let pending else {
+			return
+		}
+
+		pending.resume(returning: answer)
+
+		let landed = answerTakenUp.wait(timeout: .now() + 5) == .success
+
+		lock.lock()
+		landedDuringTheCancel = landed
+		lock.unlock()
 	}
 
 	func readTransport(minimumLength: Int, maximumLength: Int) async throws -> Data {

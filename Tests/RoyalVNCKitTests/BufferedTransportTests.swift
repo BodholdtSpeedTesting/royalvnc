@@ -112,9 +112,16 @@ final class BufferedTransportTests: XCTestCase {
 		XCTAssertEqual(base.answerLandedDuringTheCancel, true,
 					   "the read in flight was not done with the answer before the cancel returned, so the order was not tested")
 
-		if case .success(let data) = await inFlight.result {
+		switch await inFlight.result {
+		case .success(let data):
 			XCTFail("the read in flight at the cancel was handed \(Array(data)), from an answer that came after it")
+		case .failure(let error):
+			guard case .connection(.cancelled) = error as? VNCError else {
+				return XCTFail("the read in flight failed with \(error), not as cancelled")
+			}
 		}
+
+		XCTAssertEqual(base.askedCount, 1, "the read in flight asked the transport again after its block was refused")
 
 		var servedAfterTheCancel = 0
 

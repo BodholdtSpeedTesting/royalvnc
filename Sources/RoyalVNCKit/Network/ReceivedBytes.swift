@@ -8,11 +8,17 @@ import Foundation
 /// socket's `recv` (SocketNetworkConnection), or a transport's block
 /// (`BufferedTransport`).
 ///
-/// Its own object, shared by reference, and locked: SocketNetworkConnection's
-/// fast path takes from it on the caller's task and its slow path fills it on
-/// `queue`. Reads are sequential, so the lock is never contended; it is there so
-/// that stays true by construction rather than by the callers' good behaviour.
-/// Spinlock where Foundation has no NSLock, as elsewhere in the kit.
+/// Its own object, shared by reference, and locked. Reads use it one at a
+/// time -- SocketNetworkConnection's fast path takes from it on the caller's
+/// task and its slow path fills it on `queue`; BufferedTransport takes and
+/// appends on the caller's task -- so reads never contend with each other.
+/// `close()` does: `BufferedTransport.cancelTransport()` calls it on whichever
+/// thread ends the session (`VNCConnection.disconnect()`, an app's main
+/// thread) while a read may be inside `take`, `count`, `isClosed` or
+/// `append`. The lock is what keeps a close from emptying the array under a
+/// `take`, and what lets `append(_: Data)` refuse a block that lands after the
+/// close. It must not be removed or narrowed. Spinlock where Foundation has no
+/// NSLock, as elsewhere in the kit.
 final class ReceivedBytes: @unchecked Sendable {
     /// How much one read of the network asks for.
     static let chunkSize = 64 * 1024
@@ -66,7 +72,10 @@ final class ReceivedBytes: @unchecked Sendable {
         return true
     }
 
-    /// Drops whatever is waiting, and everything appended from now on.
+    /// Drops whatever is waiting, and makes every later `append(_: Data)` drop
+    /// what it is handed and return false. `append(_: ArraySlice<UInt8>)`, the
+    /// socket connection's, does not check: that connection never closes its
+    /// buffer.
     func close() {
         lock.lock()
         defer { lock.unlock() }

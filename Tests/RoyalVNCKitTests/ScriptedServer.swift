@@ -14,6 +14,7 @@ final class ScriptedTransport: VNCTransport, @unchecked Sendable {
 	private var offset = 0
 	private var cancelled = false
 	private var written = 0
+	private var reads = 0
 
 	init(script: [UInt8]) {
 		self.script = script
@@ -25,6 +26,15 @@ final class ScriptedTransport: VNCTransport, @unchecked Sendable {
 		defer { lock.unlock() }
 
 		return written
+	}
+
+	/// How many reads the connection has made of this transport, the last one -- at the script's
+	/// end -- among them.
+	var readCount: Int {
+		lock.lock()
+		defer { lock.unlock() }
+
+		return reads
 	}
 
 	var isTransportReady: Bool {
@@ -51,6 +61,8 @@ final class ScriptedTransport: VNCTransport, @unchecked Sendable {
 	func readTransport(minimumLength: Int, maximumLength: Int) async throws -> Data {
 		lock.lock()
 		defer { lock.unlock() }
+
+		reads += 1
 
 		let minimum = max(1, minimumLength)
 

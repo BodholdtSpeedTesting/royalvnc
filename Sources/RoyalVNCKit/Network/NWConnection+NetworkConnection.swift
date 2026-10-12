@@ -122,40 +122,110 @@ extension NWConnection: NetworkConnection {
 }
 
 extension NWConnection: NetworkConnectionReading {
+	/// A read with nothing kept between reads: after a completion that brought the last bytes and
+	/// the end together, the next read reports what Network.framework says then (see `ReceiveEnd`),
+	/// not the close. `NWConnectionTransport`, the kit's one reader of an NWConnection, keeps a
+	/// `ReceiveEnd` for its connection's life.
 	func read(minimumLength: Int,
               maximumLength: Int) async throws -> Data {
+		try await read(minimumLength: minimumLength,
+					   maximumLength: maximumLength,
+					   keepingEndIn: ReceiveEnd())
+	}
+
+	/// One receive, as a read: the bytes it brought, with the end of the stream -- the peer's close,
+	/// or the error that ended it -- kept in `end` for the next read when it came with them.
+	///
+	/// The bytes first, whatever else the completion says. Network.framework can deliver a stream's
+	/// last bytes in the same completion that marks it complete, or that carries the error ending it.
+	/// Apple's page for `receive(minimumIncompleteLength:maximumLength:completion:)` has the completion
+	/// deliver "the received content, which may be nil if the message is complete or an error
+	/// occurred" -- may be, not is -- and its connection.h says it outright, on the receive
+	/// completion's `content`: "Note that the content may be non-NULL even in the case of an error if
+	/// there was some data received before the error was encountered. The caller should process all
+	/// content it receives, and not necessarily ignore data in case of errors"; and on its `context`,
+	/// a TCP connection's one context, once complete, means "receiving a FIN". This read used to throw
+	/// `.closed` for any completion marked complete before it looked at the content, so a server's
+	/// last words went with the close: the reason for a refusal (RFC 6143 7.1.2: "The server closes
+	/// the connection after sending the reason-string") was lost in 2 to 7 of 10 connections over a
+	/// LAN, though never on loopback, and the handshake reported no reason at all.
+	///
+	/// A read that asks for more than remains -- a read of a block, as the kit's are
+	/// (`BufferedTransport`) -- meets this every time the bytes and the FIN are both in when it is
+	/// made, on loopback as well (measured on macOS 27). Bytes the end left short of `minimumLength`
+	/// are not handed over -- content is delivered "when at least the minimum is available, or the
+	/// content is complete" (on `minimum_incomplete_length`) -- since no later read could complete
+	/// them: the end is this read's to report.
+	func read(minimumLength: Int,
+			  maximumLength: Int,
+			  keepingEndIn end: ReceiveEnd) async throws -> Data {
+		if let ended = end.error {
+			throw ended
+		}
+
 		return try await withCheckedThrowingContinuation { continuation in
 			receive(minimumIncompleteLength: minimumLength, maximumLength: maximumLength) { content, _, isComplete, error in
-				guard !isComplete else {
-					continuation.resume(throwing: VNCError.connection(.closed))
+				// An error first: a stream that failed did not also close in good order.
+				let ending: (any Error)? = error ?? (isComplete ? VNCError.connection(.closed) : nil)
+
+				if let ending {
+					end.record(ending)
+				}
+
+				if let content,
+				   content.count >= minimumLength,
+				   content.count <= maximumLength {
+					continuation.resume(returning: content)
 
 					return
 				}
 
-				guard error == nil else {
-					continuation.resume(throwing: error!)
+				if let ending {
+					continuation.resume(throwing: ending)
 
 					return
 				}
 
-				guard let content else {
+				guard content != nil else {
 					continuation.resume(throwing: VNCError.protocol(.noData))
 
 					return
 				}
 
-				let receivedLength = content.count
-
-				guard receivedLength >= minimumLength,
-					  receivedLength <= maximumLength else {
-					continuation.resume(throwing: VNCError.protocol(.invalidData))
-
-					return
-				}
-
-				continuation.resume(returning: content)
+				continuation.resume(throwing: VNCError.protocol(.invalidData))
 			}
 		}
+	}
+}
+
+/// How a connection's incoming stream ended, once a read has seen it end: kept for the reads after
+/// the one that brought its last bytes.
+///
+/// Kept, rather than learnt again from Network.framework: a receive made after the completion that
+/// marked the stream complete does not say so again. Measured on macOS 27 over loopback, it completed
+/// with no content, `isComplete` false and POSIX error 96, ENODATA, "No message available on STREAM"
+/// -- which, handed on, would describe a closed connection as something else.
+final class ReceiveEnd: @unchecked Sendable {
+	private let lock = NSLock()
+	private var ending: (any Error)?
+
+	/// What ended the stream, if anything has.
+	var error: (any Error)? {
+		lock.lock()
+		defer { lock.unlock() }
+
+		return ending
+	}
+
+	/// Keeps the first end recorded.
+	func record(_ error: any Error) {
+		lock.lock()
+
+		if ending == nil {
+			ending = error
+		}
+
+		lock.unlock()
 	}
 }
 

@@ -91,6 +91,13 @@ public protocol VNCTransport: AnyObject, Sendable {
 	/// Must not return fewer than `minimumLength`, and **must not return more
 	/// than `maximumLength`**. The upper bound is load-bearing: RFB reads
 	/// fixed-size messages, and extra bytes desynchronise the stream.
+	///
+	/// The connection asks for a block at a time -- a minimum of one byte, and
+	/// a maximum of 64 KiB or the whole of a longer read -- and serves the
+	/// fields it reads from what comes back, so return what has arrived, as
+	/// `recv(2)` does, rather than waiting to fill `maximumLength`. Bytes that
+	/// arrive with the end of the stream are this read's; the end is the next
+	/// read's to report.
 	func readTransport(minimumLength: Int, maximumLength: Int) async throws -> Data
 
 	/// Writes `data` in full.
@@ -109,6 +116,10 @@ public protocol VNCTransport: AnyObject, Sendable {
 /// keeps that namespace clean at the cost of one allocation per connection.
 public final class NWConnectionTransport: VNCTransport {
 	public let connection: NWConnection
+
+	/// How `connection`'s incoming stream ended, once a read has seen it end. See
+	/// `NWConnection.read(minimumLength:maximumLength:keepingEndIn:)`.
+	private let end = ReceiveEnd()
 
 	public init(_ connection: NWConnection) {
 		self.connection = connection
@@ -143,7 +154,8 @@ public final class NWConnectionTransport: VNCTransport {
 	public func readTransport(minimumLength: Int,
 							  maximumLength: Int) async throws -> Data {
 		try await connection.read(minimumLength: minimumLength,
-								  maximumLength: maximumLength)
+								  maximumLength: maximumLength,
+								  keepingEndIn: end)
 	}
 
 	public func writeTransport(data: Data) async throws {
@@ -228,6 +240,11 @@ final class SocketConnectionTransport: VNCTransport {
 /// default implementations, which are built from `read(minimumLength:maximumLength:)`
 /// and `write(data:)`. So this forwards six members and inherits the rest.
 ///
+/// Every transport it carries, supplied or dialled, has its reads served in
+/// blocks (`BufferedTransport`): the decoders read a field at a time, and one
+/// read of the transport per field is what made a large first frame take
+/// seconds.
+///
 /// It exists so that `VNCConnection.connection` stays one concrete type. Letting
 /// an embedder supply an arbitrary conformer would otherwise force that property
 /// to an existential, which would ripple through the forty-odd files that take a
@@ -239,10 +256,14 @@ final class TransportNetworkConnection: NetworkConnection {
 	/// everything after it in TLS. There is no point at which a TLS connection
 	/// could have been dialled instead: the bytes that decide whether TLS
 	/// happens at all have already crossed this transport.
+	///
+	/// The transport it was given, behind its `BufferedTransport`: what a TLS
+	/// upgrade is handed, so that bytes already read from the plain stream go
+	/// with it.
 	private(set) var transport: any VNCTransport
 
 	init(transport: any VNCTransport) {
-		self.transport = transport
+		self.transport = BufferedTransport(transport)
 	}
 
 	/// Puts a new transport in place of the current one, keeping the status
@@ -256,7 +277,7 @@ final class TransportNetworkConnection: NetworkConnection {
 		let handler = statusUpdateHandler
 
 		transport.setTransportStateHandler(nil)
-		transport = replacement
+		transport = BufferedTransport(replacement)
 
 		// Re-installed rather than left behind: the connection follows the
 		// transport's lifecycle through this, and after a swap it would
@@ -268,11 +289,14 @@ final class TransportNetworkConnection: NetworkConnection {
 	private var statusUpdateHandler: NetworkConnectionStatusUpdateHandler?
 
 	/// The default transport for this platform, dialled from `settings`.
-	init(settings: NetworkConnectionSettings) {
+	///
+	/// Through `init(transport:)`, so that a dialled transport's reads are
+	/// served in blocks as a supplied one's are.
+	convenience init(settings: NetworkConnectionSettings) {
 #if canImport(Network)
-		self.transport = NWConnectionTransport(NWConnection(settings: settings))
+		self.init(transport: NWConnectionTransport(NWConnection(settings: settings)))
 #else
-		self.transport = SocketConnectionTransport(SocketNetworkConnection(settings: settings))
+		self.init(transport: SocketConnectionTransport(SocketNetworkConnection(settings: settings)))
 #endif
 	}
 

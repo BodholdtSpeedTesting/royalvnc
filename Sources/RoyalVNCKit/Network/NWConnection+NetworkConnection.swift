@@ -13,6 +13,14 @@ extension NWConnection: NetworkConnection {
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.connectionTimeout = settings.connectionTimeout
 
+        // A server may send nothing while its screen is still; keepalive is
+        // how a viewer notices one that has gone away (TCPKeepalive). In
+        // seconds.
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = Int(TCPKeepalive.idleSeconds)
+        tcpOptions.keepaliveInterval = Int(TCPKeepalive.intervalSeconds)
+        tcpOptions.keepaliveCount = Int(TCPKeepalive.probeCount)
+
         let connectionParameters = NWParameters(tls: nil,
                                                 tcp: tcpOptions)
 

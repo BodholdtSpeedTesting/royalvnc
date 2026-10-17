@@ -64,6 +64,92 @@ final class Socket: Sendable {
         _ = setsockopt(nativeSocket, SOL_SOCKET, SO_NOSIGPIPE,
                        &on, socklen_t(MemoryLayout<Int32>.size))
 #endif
+
+        // Keepalive, on every platform, so that a server that goes away while
+        // it has nothing to send -- a still screen -- is noticed
+        // (TCPKeepalive). An option a platform refuses leaves its own setting
+        // (two hours, by default): no connection fails for want of it.
+        _ = Self.enableKeepalive(nativeSocket)
+    }
+
+    /// The options `TCPKeepalive` asks for, as this platform spells them:
+    /// SO_KEEPALIVE on, then the idle time (TCP_KEEPIDLE; Darwin's
+    /// TCP_KEEPALIVE), the interval and the count, in seconds. Windows takes the
+    /// same three at IPPROTO_TCP from Windows 10 1709 (TCP_KEEPIDLE,
+    /// TCP_KEEPINTVL and TCP_KEEPCNT; ws2ipdef.h numbers them 3, 17 and 16),
+    /// literal here so as not to depend on the SDK's headers.
+    static var keepaliveOptions: [(level: Int32, name: Int32, value: Int32)] {
+        let idle = TCPKeepalive.idleSeconds
+        let interval = TCPKeepalive.intervalSeconds
+        let count = TCPKeepalive.probeCount
+
+#if canImport(Glibc) || canImport(Android)
+        let tcp = Int32(IPPROTO_TCP)
+
+        return [(SOL_SOCKET, SO_KEEPALIVE, 1),
+                (tcp, TCP_KEEPIDLE, idle),
+                (tcp, TCP_KEEPINTVL, interval),
+                (tcp, TCP_KEEPCNT, count)]
+#elseif canImport(WinSDK)
+        let tcp = Int32(IPPROTO_TCP.rawValue)
+
+        return [(SOL_SOCKET, SO_KEEPALIVE, 1),
+                (tcp, 3, idle),           // TCP_KEEPIDLE
+                (tcp, 17, interval),      // TCP_KEEPINTVL
+                (tcp, 16, count)]         // TCP_KEEPCNT
+#elseif canImport(Darwin)
+        let tcp: Int32 = IPPROTO_TCP
+
+        return [(SOL_SOCKET, SO_KEEPALIVE, 1),
+                (tcp, TCP_KEEPALIVE, idle),
+                (tcp, TCP_KEEPINTVL, interval),
+                (tcp, TCP_KEEPCNT, count)]
+#endif
+    }
+
+    /// Sets `keepaliveOptions` on `socket`; false where any is refused.
+    private static func enableKeepalive(_ socket: NativeSocket) -> Bool {
+        var all = true
+
+        for option in keepaliveOptions {
+            var value = option.value
+
+#if canImport(WinSDK)
+            let result = withUnsafeBytes(of: &value) { raw in
+                setsockopt(socket, option.level, option.name,
+                           raw.baseAddress?.assumingMemoryBound(to: CChar.self), Int32(raw.count))
+            }
+#else
+            let result = setsockopt(socket, option.level, option.name,
+                                    &value, socklen_t(MemoryLayout<Int32>.size))
+#endif
+
+            all = result == 0 && all
+        }
+
+        return all
+    }
+
+    /// An integer option of this socket, as `getsockopt` reads it back; nil
+    /// where the read is refused. For the tests. Windows reads SO_KEEPALIVE back
+    /// as a one-byte BOOL, so the value starts from zero.
+    func intOption(level: Int32, name: Int32) -> Int32? {
+        var value: Int32 = 0
+
+#if canImport(WinSDK)
+        var size = Int32(MemoryLayout<Int32>.size)
+
+        let result = withUnsafeMutableBytes(of: &value) { raw in
+            getsockopt(nativeSocket, level, name,
+                       raw.baseAddress?.assumingMemoryBound(to: CChar.self), &size)
+        }
+#else
+        var size = socklen_t(MemoryLayout<Int32>.size)
+
+        let result = getsockopt(nativeSocket, level, name, &value, &size)
+#endif
+
+        return result == 0 ? value : nil
     }
 
     func connect() throws(Errors) {

@@ -10,10 +10,12 @@
 //
 // Now a cancel ends the connection at once: a read or a write waiting on another thread, and a
 // connect under way, return; the server is sent the end of the stream; and the descriptor is closed
-// once nothing uses it, and never again (the release closes nothing more). Each case runs against a
-// server of its own on loopback (LoopbackServer), from outside the kit -- the server's end of the
-// connection, and on POSIX the process's own descriptors. SocketDescriptorTests holds what needs the
-// kit's own seams: a descriptor never closed while a call still uses it.
+// once nothing uses it, and never again (the release closes nothing more). And what the socket's not
+// blocking brought with it: a connect's outcome is read from the socket, so a refused one fails with
+// the socket's own error, and a write is sent whole, however little of it one send takes. Each case
+// runs against a server of its own on loopback (LoopbackServer), from outside the kit -- the server's
+// end of the connection, and on POSIX the process's own descriptors. SocketDescriptorTests holds what
+// needs the kit's own seams: a descriptor never closed while a call still uses it.
 
 import Foundation
 import Dispatch
@@ -171,6 +173,45 @@ final class SocketCancelTests: XCTestCase {
 		dial.async { free.signal() }
 
 		XCTAssertEqual(free.wait(timeout: .now() + 2), .success, "the dial returns with the cancel")
+	}
+
+	/// A connect to a port nothing listens on -- a server's, let go of -- fails, refused, with the
+	/// socket's own error (ECONNREFUSED; WSAECONNREFUSED on Windows): the connect is waited for a slice
+	/// at a time, and what it came to is read from the socket (SO_ERROR), not taken as connected because
+	/// the wait ended. (A blocking connect failed with the -1 it returned, which said nothing of why.)
+	func testARefusedConnectFailsWithTheSocketsError() throws {
+		let port = try LoopbackServer().port // let go of at once: nothing listens there now
+
+		let connection = SocketNetworkConnection(settings: NetworkConnectionSettings(connectionTimeout: 15,
+																					 host: "127.0.0.1",
+																					 port: port))
+
+		connection.start(queue: DispatchQueue(label: "SocketCancelTests.dial"))
+
+		defer { connection.cancel() }
+
+		XCTAssertTrue(holds(within: 10) {
+			switch connection.status {
+				case .failed, .ready: return true
+				default: return false
+			}
+		}, "the dial ends: \(connection.status)")
+
+		guard case .failed(let error) = connection.status else {
+			return XCTFail("a refused connect taken as \(connection.status)")
+		}
+
+		guard let failure = error as? Socket.Errors, case .connectFailed(let code) = failure else {
+			return XCTFail("not a connect failure: \(error)")
+		}
+
+#if canImport(WinSDK)
+		let refused = Int32(WSAECONNREFUSED)
+#else
+		let refused = ECONNREFUSED
+#endif
+
+		XCTAssertEqual(code, refused, "the socket's own error: \(failure.localizedDescription)")
 	}
 
 	/// A connection cancelled before it is started dials nothing: a cancelled connection stays so.
@@ -376,6 +417,66 @@ final class SocketCancelTests: XCTestCase {
 
 		XCTAssertTrue(holds(within: 2) { released == nil }, "the connection let go of")
 		XCTAssertTrue(LoopbackServer.isOpen(mine), "the release closes nothing more: the number is the test's socket's now")
+	}
+
+	/// A write larger than the socket takes at once, to a server that starts reading half a second late,
+	/// is sent whole and in order, and says it is written once it is. The socket does not block, so a
+	/// send takes only what there is room for -- on loopback a few hundred kilobytes on macOS and a few
+	/// megabytes on Linux at a time -- and the write waits for room and sends the rest. (A blocking send
+	/// took it all; one send per write would now say a write was written when most of it never left.)
+	/// Each four bytes are their own place in the write, so a byte lost, doubled or out of order shows.
+	/// POSIX: on Windows a single loopback send of 64 MB was taken whole, so this would hold nothing there.
+	func testAWriteLargerThanTheSocketTakesAtOnceArrivesWholeAndInOrder() throws {
+		let server = try LoopbackServer()
+		let connection = try readyConnection(to: server)
+		let taken = try XCTUnwrap(server.take(within: 5), "the server took the connection")
+
+		defer { taken.close() }
+		defer { connection.cancel() }
+
+		let size = 16 << 20
+		var bytes = [UInt8](repeating: 0, count: size)
+
+		for place in 0..<(size / 4) {
+			let value = UInt32(place)
+
+			bytes[place * 4] = UInt8(truncatingIfNeeded: value)
+			bytes[place * 4 + 1] = UInt8(truncatingIfNeeded: value >> 8)
+			bytes[place * 4 + 2] = UInt8(truncatingIfNeeded: value >> 16)
+			bytes[place * 4 + 3] = UInt8(truncatingIfNeeded: value >> 24)
+		}
+
+		let writing = write(Data(bytes), to: connection)
+
+		Thread.sleep(forTimeInterval: 0.5)
+
+		XCTAssertNil(writing.value, "the write waits for room: the server has read nothing yet")
+
+		var received: [UInt8] = []
+		var buffer = [UInt8](repeating: 0, count: 1 << 16)
+		var lastArrival = Date()
+
+		received.reserveCapacity(size)
+
+		while received.count < size, Date().timeIntervalSince(lastArrival) < 2 {
+			guard LoopbackServer.waitReadable(taken.handle, milliseconds: 50) else {
+				continue
+			}
+
+			let count = buffer.withUnsafeMutableBytes { recv(taken.handle, $0.baseAddress, $0.count, 0) }
+
+			guard count > 0 else {
+				break
+			}
+
+			received += buffer.prefix(count)
+			lastArrival = Date()
+		}
+
+		XCTAssertTrue(holds(within: 2) { writing.value != nil }, "the write returns")
+		XCTAssertEqual(writing.value, "written")
+		XCTAssertEqual(received.count, size, "every byte of the write reached the server")
+		XCTAssertTrue(received == bytes, "in order")
 	}
 #endif
 }

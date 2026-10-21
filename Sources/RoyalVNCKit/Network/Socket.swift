@@ -488,10 +488,10 @@ final class Socket: @unchecked Sendable {
     /// it: here, or by the last call under way (`leave()`), which returns,
     /// cancelled, at the end of its slice at the latest. The shutdown is a use
     /// of the descriptor as a call's is, counted in `users` in the step that
-    /// marks the socket cancelled, so nothing can close the descriptor under
-    /// it: it is only ever of this socket's descriptor, never of a number
-    /// closed and given out again. Every call after this fails as cancelled
-    /// without using the descriptor.
+    /// marks the socket cancelled and given back only once the shutdown is
+    /// made, so nothing can close the descriptor under it: it is only ever of
+    /// this socket's descriptor, never of a number closed and given out again.
+    /// Every call after this fails as cancelled without using the descriptor.
     func cancel() {
         lock.lock()
 
@@ -560,6 +560,16 @@ final class Socket: @unchecked Sendable {
     /// while it cancels the socket and looks at the descriptor. Nil but in a
     /// test that sets it, and set only while that test runs.
     nonisolated(unsafe) static var beforeWaitingForTests: ((Socket) -> Void)?
+
+    /// For the tests alone: called with the descriptor's number as the first step of
+    /// `shutDown(_:)`, the shutdown of any socket's descriptor -- a cancel's, the only one
+    /// made -- before either half is shut down: so that a test can hold the cancel there while a
+    /// call under way sees the cancel and returns, and see the number as the shutdown is about
+    /// to use it -- open, and still this socket's, not closed by that call as the last one out,
+    /// nor by the cancel's own count given back first. Inside the shutdown, so that no order of
+    /// `cancel()`'s steps can put anything between this and the shutdown it sees. Nil but in a
+    /// test that sets it, and set only while that test runs.
+    nonisolated(unsafe) static var beforeShuttingDownForTests: ((NativeSocket) -> Void)?
 #endif
 
     /// Waits up to a slice for the socket to be readable (`readable`) or to
@@ -723,6 +733,10 @@ final class Socket: @unchecked Sendable {
     /// (measured in the embedder). "The shutdown function does not close the
     /// socket" (Microsoft's shutdown page), nor does shutdown(2).
     private static func shutDown(_ socket: NativeSocket) {
+#if DEBUG
+        beforeShuttingDownForTests?(socket)
+#endif
+
 #if canImport(Glibc)
         _ = Glibc.shutdown(socket, Int32(SHUT_WR))
         _ = Glibc.shutdown(socket, Int32(SHUT_RD))

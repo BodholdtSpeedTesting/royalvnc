@@ -4,7 +4,7 @@
 // comes. POSIX sockets, or WinSock. And, on POSIX, the process's own descriptors, read from outside
 // the kit: which number is the kit's end of a connection, whether a number is open, and a socket of
 // the test's given a number of its choosing -- the lowest number free is the one a new descriptor
-// gets.
+// gets -- and connected where the test says.
 
 import Foundation
 import Dispatch
@@ -358,6 +358,33 @@ extension LoopbackServer {
 		}
 
 		return nil
+	}
+
+	/// Connects `handle`, a socket of the test's not yet connected, to `port` on 127.0.0.1, waiting
+	/// for the connect to finish (it blocks; on loopback, at once): whether it connected.
+	static func connect(_ handle: Int32, toPort port: UInt16) -> Bool {
+		var address = sockaddr_in()
+
+#if canImport(Darwin)
+		address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+#endif
+		address.sin_family = sa_family_t(AF_INET)
+		address.sin_addr.s_addr = UInt32(0x7F00_0001).bigEndian
+		address.sin_port = port.bigEndian
+
+		let length = socklen_t(MemoryLayout<sockaddr_in>.size)
+
+		return withUnsafePointer(to: &address) {
+			$0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+#if canImport(Glibc)
+				Glibc.connect(handle, $0, length) == 0
+#elseif canImport(Android)
+				Android.connect(handle, $0, length) == 0
+#else
+				Darwin.connect(handle, $0, length) == 0
+#endif
+			}
+		}
 	}
 }
 #endif

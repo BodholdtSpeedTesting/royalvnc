@@ -79,10 +79,10 @@ final class BufferedTransport: VNCTransport {
 	/// transport is cancelled, so an answer that lands while the transport is
 	/// being cancelled is refused as well.
 	///
-	/// Every read after the cancel goes to the transport. An NWConnection fails
-	/// it at once. The socket connection (Linux, Windows) does nothing on a
-	/// cancel, so a read of it waits in `recv` until the server sends, which is
-	/// refused, or closes.
+	/// Every read after the cancel goes to the transport, which fails it at
+	/// once: an NWConnection, and the socket connection (Linux, Windows), whose
+	/// cancel ends a read already waiting for the server as well
+	/// (`SocketNetworkConnection.cancel()`).
 	func cancelTransport() {
 		received.close()
 		base.cancelTransport()

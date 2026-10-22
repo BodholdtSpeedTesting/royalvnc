@@ -509,7 +509,8 @@ extension VNCCAFramebufferView {
 	/// significant to the key (`VNCKeyCode.isShiftSignificant(cgKeyCode:)`), with the event's Shift.
 	/// An auto-repeat sends what the key types now too, letting go of what its press sent first where
 	/// that, or the Shift remembered, has changed (HeldKeyCodes). A repeat is no new key: it is worked
-	/// out without the view's dead-key bookkeeping, which it leaves as it is.
+	/// out without the view's dead-key bookkeeping, which it leaves as it is. A modifier goes as the
+	/// connection's `modifierKeyCodeMapping` maps it (`mappingModifier`), remembered so.
 	func handleKeyDown(with event: NSEvent?) {
 		guard let event,
               let connection else {
@@ -522,10 +523,12 @@ extension VNCCAFramebufferView {
 		let keys = connection.heldKeyCodes.keyDown(event.keyCode,
 												   isARepeat: event.isARepeat,
 												   shift: shift) {
-			event.isARepeat
-				? VNCKeyCode.keyCodesFrom(event: event,
-										  charactersWithoutDeadKeys: charactersWithoutDeadKeys(event))
-				: keyCodesFrom(event: event)
+			mappingModifier(event.isARepeat
+								? VNCKeyCode.keyCodesFrom(event: event,
+														  charactersWithoutDeadKeys: charactersWithoutDeadKeys(event))
+								: keyCodesFrom(event: event),
+							of: event,
+							on: connection)
 		}
 
 		for keyCode in keys.released {
@@ -539,7 +542,8 @@ extension VNCCAFramebufferView {
 
 	/// A key comes up as exactly what its key-down sent, whatever it would type now, whichever view
 	/// on the connection saw it go down; a key none did -- held across a reconnect, a new connection
-	/// -- as its `charactersIgnoringModifiers`, as every key-up was before.
+	/// -- as its `charactersIgnoringModifiers`, as every key-up was before, a modifier as the
+	/// connection's `modifierKeyCodeMapping` maps it now.
 	func handleKeyUp(with event: NSEvent?) {
 		guard let event,
               let connection else {
@@ -547,7 +551,9 @@ extension VNCCAFramebufferView {
 		}
 
 		let keyCodes = connection.heldKeyCodes.keyUp(event.keyCode) {
-			keyCodesIgnoringModifiersFrom(event: event)
+			mappingModifier(keyCodesIgnoringModifiersFrom(event: event),
+							of: event,
+							on: connection)
 		}
 
 		for keyCode in keyCodes {
@@ -620,6 +626,20 @@ extension VNCCAFramebufferView {
 	func keyCodesIgnoringModifiersFrom(event: NSEvent) -> [VNCKeyCode] {
 		logIfUnconvertable(VNCKeyCode.keyCodesIgnoringModifiersFrom(event: event),
 						   event: event)
+	}
+
+	/// A modifier key's keys (`VNCKeyCode.isModifier(cgKeyCode:)`) as the connection's
+	/// `modifierKeyCodeMapping` maps them; any other key's, and every key's while there is no mapping,
+	/// as they are.
+	func mappingModifier(_ keys: [VNCKeyCode],
+						 of event: NSEvent,
+						 on connection: VNCConnection) -> [VNCKeyCode] {
+		guard let mapping = connection.modifierKeyCodeMapping,
+			  VNCKeyCode.isModifier(cgKeyCode: CGKeyCode(event.keyCode)) else {
+			return keys
+		}
+
+		return keys.map(mapping)
 	}
 
 	private func logIfUnconvertable(_ keys: [VNCKeyCode],

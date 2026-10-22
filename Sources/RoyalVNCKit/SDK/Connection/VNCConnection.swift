@@ -386,6 +386,26 @@ public final class VNCConnection: NSObjectOrAnyObject {
 		}
 	}
 
+#if os(macOS)
+	/// The keys the Mac framebuffer view sends for the modifier keys -- Shift, Control, Option and
+	/// Command, on either side -- in place of the ones it works out for them
+	/// (`VNCKeyCode.from(cgKeyCode:)`: `.command` for the left Command key, `.rightCommand` for the
+	/// right): given each, the key to send. Nil, the default, sends each as it is.
+	///
+	/// For an embedder whose user would have a modifier do on the server what another one does there:
+	/// Command sent as Control, say, so that Command-C copies on a Windows or Linux machine, where
+	/// Command's keysym, Super, is the Windows key. Applied before the keysyms an Apple Remote Desktop
+	/// server is sent for Command and Option (`rawValue(forAppleRemoteDesktop:)`), so that a key mapped
+	/// to Control goes as Control there too. The view's other keys, and the embedder's own
+	/// `keyDown(_:)` and `keyUp(_:)`, are not given to it.
+	///
+	/// Asked as each modifier goes down -- and, for one no view on this connection saw go down, as it
+	/// comes up -- so it may be changed at any time, before a connection or during one: a key held
+	/// meanwhile comes up as what it went down as (`heldKeyCodes`). Set and read on the main thread,
+	/// where AppKit delivers key events; no lock, as `heldKeyCodes` has none.
+	public var modifierKeyCodeMapping: ((VNCKeyCode) -> VNCKeyCode)?
+#endif
+
 	// MARK: - Private Properties
 	private var hasCreatedConnection = false
 

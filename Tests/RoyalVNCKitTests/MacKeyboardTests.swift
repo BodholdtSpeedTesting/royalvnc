@@ -43,10 +43,15 @@ private enum Key {
 	static let backslash: UInt16 = 0x2a    // kVK_ANSI_Backslash
 	static let semicolon: UInt16 = 0x29    // kVK_ANSI_Semicolon: 'ñ' on Spanish - ISO
 	static let space: UInt16 = 0x31        // kVK_Space
+	static let rightCommand: UInt16 = 0x36 // kVK_RightCommand
 	static let command: UInt16 = 0x37      // kVK_Command
 	static let shift: UInt16 = 0x38        // kVK_Shift
 	static let capsLock: UInt16 = 0x39     // kVK_CapsLock
 	static let option: UInt16 = 0x3a       // kVK_Option
+	static let control: UInt16 = 0x3b      // kVK_Control
+	static let rightShift: UInt16 = 0x3c   // kVK_RightShift
+	static let rightOption: UInt16 = 0x3d  // kVK_RightOption
+	static let rightControl: UInt16 = 0x3e // kVK_RightControl
 	static let keypadPlus: UInt16 = 0x45   // kVK_ANSI_KeypadPlus
 	static let keypadEquals: UInt16 = 0x51 // kVK_ANSI_KeypadEquals
 	static let keypad5: UInt16 = 0x57      // kVK_ANSI_Keypad5
@@ -1158,6 +1163,106 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		flags(Key.capsLock, [ ])
 
 		XCTAssertEqual(sent(), [ "down 0xa7", "up 0xa7" ])
+	}
+
+	// MARK: The connection's modifierKeyCodeMapping
+
+	/// Command as Control: the mapping an embedder sends a Windows or Linux machine, whose Control does what a Mac's
+	/// Command does.
+	private static func commandAsControl(_ key: VNCKeyCode) -> VNCKeyCode {
+		switch key {
+			case .command: return .control
+			case .rightCommand: return .rightControl
+			default: return key
+		}
+	}
+
+	func testTheCommandKeysGoAsTheMappingSays() {
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+
+		// Command-C with the left Command key, then the right: Control (left) 0xffe3, Control (right) 0xffe4, and the C.
+		flags(Key.command, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		up(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+		flags(Key.rightCommand, [ .command, .rightCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .rightCommand ])
+		up(Key.c, "c", ignoring: "c", flags: [ .command, .rightCommand ])
+		flags(Key.rightCommand, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63", "up 0xffe3",
+								 "down 0xffe4", "down 0x63", "up 0x63", "up 0xffe4" ])
+
+		// With no mapping, Super (left) 0xffeb and Super (right) 0xffec, as before.
+		connection.modifierKeyCodeMapping = nil
+		flags(Key.command, [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+		flags(Key.rightCommand, [ .command, .rightCommand ])
+		flags(Key.rightCommand, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffeb", "up 0xffeb", "down 0xffec", "up 0xffec" ])
+	}
+
+	func testAModifierHeldWhileTheMappingChangesComesUpAsItWentDown() {
+		// Mapped going down, the mapping taken away while it is held: let go of as Control, the key the server holds --
+		// not as Super, which would leave Control held there. And the other way round.
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		flags(Key.command, [ .command, .leftCommand ])
+		connection.modifierKeyCodeMapping = nil
+		flags(Key.command, [ ])
+		flags(Key.rightCommand, [ .command, .rightCommand ])
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		flags(Key.rightCommand, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "up 0xffe3", "down 0xffec", "up 0xffec" ])
+	}
+
+	func testTheMappingIsGivenTheModifierKeysAlone() {
+		// A mapping of every key to 'x' (0x78): Shift, Control, Option and Command, on either side, go as it says; a
+		// letter, a key with a keysym of its own and the embedder's own keyDown(_:) and keyUp(_:) are not given to it.
+		connection.modifierKeyCodeMapping = { _ in VNCKeyCode(0x78) }
+
+		for (keyCode, flag) in [ (Key.shift, NSEvent.ModifierFlags.leftShift), (Key.rightShift, .rightShift),
+								 (Key.control, .leftControl), (Key.rightControl, .rightControl),
+								 (Key.option, .leftOption), (Key.rightOption, .rightOption),
+								 (Key.command, .leftCommand), (Key.rightCommand, .rightCommand) ] {
+			flags(keyCode, flag)
+			flags(keyCode, [ ])
+		}
+
+		XCTAssertEqual(sent(), Array(repeating: [ "down 0x78", "up 0x78" ], count: 8).flatMap { $0 })
+
+		down(Key.a, "a", ignoring: "a")
+		up(Key.a, "a", ignoring: "a")
+		down(Key.leftArrow, "\u{F702}", ignoring: "\u{F702}", flags: [ .numericPad, .function ])
+		up(Key.leftArrow, "\u{F702}", ignoring: "\u{F702}", flags: [ .numericPad, .function ])
+		connection.keyDown(.command)
+		connection.keyUp(.command)
+
+		XCTAssertEqual(sent(), [ "down 0x61", "up 0x61", "down 0xff51", "up 0xff51", "down 0xffeb", "up 0xffeb" ])
+	}
+
+	func testAModifierUpNoViewSawGoDownGoesAsTheMappingSaysNow() {
+		// Held across a reconnect -- a new connection, which holds nothing -- its key-up is worked out again.
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		view.keyUp(with: keyEvent(.keyUp, Key.command, "", ignoring: ""))
+
+		XCTAssertEqual(sent(), [ "up 0xffe3" ])
+	}
+
+	func testAKeyMappedToControlGoesAsControlToAnAppleRemoteDesktopServer() {
+		// A server announcing RFB 003.889 is sent Command as Hyper (left) 0xffed and Option as Meta (left) 0xffe7
+		// (`rawValue(forAppleRemoteDesktop:)`); a key the mapping makes Control goes as Control, which that leaves alone.
+		connection.state.serverProtocolVersion = .init(majorVersion: 3, minorVersion: 889)
+		flags(Key.command, [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		flags(Key.command, [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+		flags(Key.option, [ .option, .leftOption ])
+		flags(Key.option, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffed", "up 0xffed", "down 0xffe3", "up 0xffe3", "down 0xffe7", "up 0xffe7" ])
 	}
 
 	func testAKeyHeldWhileAnotherViewTakesThisOnesPlaceComesUpAsItWentDown() throws {

@@ -265,6 +265,36 @@ public final class VNCConnection: NSObjectOrAnyObject {
 #endif
 	private var offeredSecurityTypesStorage: [UInt32] = []
 
+	/// The protocol version the server announced in its ProtocolVersion message (RFC 6143 7.1.1:
+	/// "RFB xxx.yyy", where "xxx and yyy are the major and minor version numbers"), as those two
+	/// numbers: 3 and 8 for "RFB 003.008"; 3 and 889 for "RFB 003.889", Apple's Screen Sharing
+	/// (`isAppleRemoteDesktop`), which this kit answers as 3.8.
+	///
+	/// `nil` until the server's ProtocolVersion has been read. Readable from any thread, and
+	/// guarded, for the same reason as ``negotiatedSecurityMethod``: written on the handshake's task,
+	/// read by an embedder anywhere -- one that does a thing its own way for one kind of server and
+	/// has no other way to tell it, since what the server announced is otherwise kept inside the kit.
+	public internal(set) var serverProtocolVersion: (major: UInt32, minor: UInt32)? {
+		get {
+			serverProtocolVersionLock.lock()
+			defer { serverProtocolVersionLock.unlock() }
+
+			return serverProtocolVersionStorage
+		}
+		set {
+			serverProtocolVersionLock.lock()
+			serverProtocolVersionStorage = newValue
+			serverProtocolVersionLock.unlock()
+		}
+	}
+
+#if canImport(Glibc) || canImport(Android) || canImport(WinSDK)
+	private let serverProtocolVersionLock = Spinlock()
+#else
+	private let serverProtocolVersionLock = NSLock()
+#endif
+	private var serverProtocolVersionStorage: (major: UInt32, minor: UInt32)?
+
 	/// Wraps the live transport in TLS, for a security type that upgrades
 	/// mid-stream.
 	///

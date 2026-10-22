@@ -22,6 +22,7 @@ private extension VNCConnection {
 			logger.logDebug("Received Server Protocol Version: \(protocolVersion.protocolVersion)")
 
 			state.serverProtocolVersion = protocolVersion
+			serverProtocolVersion = (protocolVersion.majorVersion, protocolVersion.minorVersion)
 		} catch {
 			throw VNCError.ConnectionError.closedDuringHandshake(handshakingPhase: "Receive Protocol Version",
 																 underlyingError: error)

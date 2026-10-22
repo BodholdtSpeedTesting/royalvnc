@@ -1265,6 +1265,52 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		XCTAssertEqual(sent(), [ "down 0xffed", "up 0xffed", "down 0xffe3", "up 0xffe3", "down 0xffe7", "up 0xffe7" ])
 	}
 
+	func testControlAndACommandKeyMappedToItHeldTogetherAreOneControl() {
+		// Command mapped to Control: the Control key and the Command key on one side send one keysym, and a server keeps one
+		// key held for it -- a second down is a repeat, and the first up lets it go. So it goes down with the first of the two
+		// and up with the last: Control held across a Command press and release, either way round, is still held for the C.
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+
+		flags(Key.control, [ .control, .leftControl ])
+		flags(Key.command, [ .control, .leftControl, .command, .leftCommand ])
+		flags(Key.command, [ .control, .leftControl ])
+		down(Key.c, "c", ignoring: "c", flags: [ .control, .leftControl ])
+		up(Key.c, "c", ignoring: "c", flags: [ .control, .leftControl ])
+		flags(Key.control, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63", "up 0xffe3" ])
+
+		flags(Key.command, [ .command, .leftCommand ])
+		flags(Key.control, [ .control, .leftControl, .command, .leftCommand ])
+		flags(Key.control, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		up(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63", "up 0xffe3" ])
+
+		// Let go of in the order they went down; and the right-hand keys, Control (right) 0xffe4.
+		flags(Key.control, [ .control, .leftControl ])
+		flags(Key.command, [ .control, .leftControl, .command, .leftCommand ])
+		flags(Key.control, [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+		flags(Key.rightCommand, [ .command, .rightCommand ])
+		flags(Key.rightControl, [ .control, .rightControl, .command, .rightCommand ])
+		flags(Key.rightCommand, [ .control, .rightControl ])
+		flags(Key.rightControl, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "up 0xffe3", "down 0xffe4", "up 0xffe4" ])
+
+		// With no mapping, Control and Super, two keys, each sent as before.
+		connection.modifierKeyCodeMapping = nil
+		flags(Key.control, [ .control, .leftControl ])
+		flags(Key.command, [ .control, .leftControl, .command, .leftCommand ])
+		flags(Key.command, [ .control, .leftControl ])
+		flags(Key.control, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0xffeb", "up 0xffeb", "up 0xffe3" ])
+	}
+
 	func testAKeyHeldWhileAnotherViewTakesThisOnesPlaceComesUpAsItWentDown() throws {
 		// Caps Lock on, A held while another view is put on the connection, which the key-up reaches: 'A' let go of, as it went
 		// down -- not 'a', its charactersIgnoringModifiers, which would leave 'A' held on the server.

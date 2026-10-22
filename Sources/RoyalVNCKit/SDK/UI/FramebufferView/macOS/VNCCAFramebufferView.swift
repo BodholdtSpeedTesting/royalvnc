@@ -510,7 +510,8 @@ extension VNCCAFramebufferView {
 	/// An auto-repeat sends what the key types now too, letting go of what its press sent first where
 	/// that, or the Shift remembered, has changed (HeldKeyCodes). A repeat is no new key: it is worked
 	/// out without the view's dead-key bookkeeping, which it leaves as it is. A modifier goes as the
-	/// connection's `modifierKeyCodeMapping` maps it (`mappingModifier`), remembered so.
+	/// connection's `modifierKeyCodeMapping` maps it (`mappingModifier`), remembered so; and one whose
+	/// key another held key sent already is not sent again (`heldElsewhere`).
 	func handleKeyDown(with event: NSEvent?) {
 		guard let event,
               let connection else {
@@ -531,11 +532,11 @@ extension VNCCAFramebufferView {
 							on: connection)
 		}
 
-		for keyCode in keys.released {
+		for keyCode in keys.released where !heldElsewhere(keyCode, by: event, on: connection) {
 			connection.keyUp(keyCode)
 		}
 
-		for keyCode in keys.pressed {
+		for keyCode in keys.pressed where !heldElsewhere(keyCode, by: event, on: connection) {
 			connection.keyDown(keyCode)
 		}
 	}
@@ -543,7 +544,8 @@ extension VNCCAFramebufferView {
 	/// A key comes up as exactly what its key-down sent, whatever it would type now, whichever view
 	/// on the connection saw it go down; a key none did -- held across a reconnect, a new connection
 	/// -- as its `charactersIgnoringModifiers`, as every key-up was before, a modifier as the
-	/// connection's `modifierKeyCodeMapping` maps it now.
+	/// connection's `modifierKeyCodeMapping` maps it now. A modifier's key that another held key
+	/// still holds is not let go of (`heldElsewhere`).
 	func handleKeyUp(with event: NSEvent?) {
 		guard let event,
               let connection else {
@@ -556,7 +558,7 @@ extension VNCCAFramebufferView {
 							on: connection)
 		}
 
-		for keyCode in keyCodes {
+		for keyCode in keyCodes where !heldElsewhere(keyCode, by: event, on: connection) {
 			connection.keyUp(keyCode)
 		}
 	}
@@ -640,6 +642,21 @@ extension VNCCAFramebufferView {
 		}
 
 		return keys.map(mapping)
+	}
+
+	/// Whether a modifier key's `key` (`VNCKeyCode.isModifier(cgKeyCode:)`) is held on the server by
+	/// another key the connection holds (`HeldKeyCodes.holds(_:besides:)`), so that this key's press
+	/// is not sent again and its release lets nothing go: with `modifierKeyCodeMapping` mapping
+	/// Command to Control, the Control key and the Command key on one side both send Control, and a
+	/// server keeps one key held for a keysym -- a second down is a repeat, and the first up lets it
+	/// go, with the other key still held. So the keysym goes down with the first of the two and up
+	/// with the last. Any other key, and every modifier with no mapping -- no two of which share a
+	/// keysym -- as before.
+	func heldElsewhere(_ key: VNCKeyCode,
+					   by event: NSEvent,
+					   on connection: VNCConnection) -> Bool {
+		VNCKeyCode.isModifier(cgKeyCode: CGKeyCode(event.keyCode))
+			&& connection.heldKeyCodes.holds(key, besides: event.keyCode)
 	}
 
 	private func logIfUnconvertable(_ keys: [VNCKeyCode],

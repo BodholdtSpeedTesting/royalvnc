@@ -75,6 +75,14 @@ struct HeldKeyCodes {
 		sent.removeValue(forKey: keyCode)?.keys ?? keyCodes()
 	}
 
+	/// Whether a key held here other than `keyCode` went down as `key`, and so holds it on the server
+	/// still: two keys send one keysym where the connection's `modifierKeyCodeMapping` maps one
+	/// modifier to another (Command to Control, beside the Control key itself).
+	func holds(_ key: VNCKeyCode,
+			   besides keyCode: UInt16) -> Bool {
+		sent.contains { $0.key != keyCode && $0.value.keys.contains(key) }
+	}
+
 	/// Whether every key seen going down has been seen coming up.
 	var isEmpty: Bool {
 		sent.isEmpty

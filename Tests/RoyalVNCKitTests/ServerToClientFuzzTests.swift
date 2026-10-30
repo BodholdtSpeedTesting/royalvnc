@@ -44,6 +44,8 @@ import Foundation
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif canImport(WinSDK)
+import WinSDK
 #endif
 
 final class ServerToClientFuzzTests: XCTestCase {
@@ -152,8 +154,22 @@ final class ServerToClientFuzzTests: XCTestCase {
 	}
 }
 
-/// The process's peak resident size, in bytes.
+/// The process's peak resident size, in bytes: on Windows its peak working set (GetProcessMemoryInfo's
+/// PROCESS_MEMORY_COUNTERS.PeakWorkingSetSize, "The peak working set size, in bytes", which Psapi.h defines as
+/// K32GetProcessMemoryInfo in Kernel32), where there is no getrusage(2); elsewhere getrusage's ru_maxrss.
 func peakResidentBytes() -> Int {
+#if canImport(WinSDK)
+	var counters = PROCESS_MEMORY_COUNTERS()
+	let size = DWORD(MemoryLayout<PROCESS_MEMORY_COUNTERS>.size)
+
+	counters.cb = size
+
+	guard K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, size) else {
+		fatalError("GetProcessMemoryInfo failed: error \(GetLastError())")
+	}
+
+	return Int(counters.PeakWorkingSetSize) // bytes on Windows
+#else
 	var usage = rusage()
 
 #if canImport(Glibc)
@@ -164,6 +180,7 @@ func peakResidentBytes() -> Int {
 	getrusage(RUSAGE_SELF, &usage)
 
 	return Int(usage.ru_maxrss) // bytes on macOS
+#endif
 #endif
 }
 

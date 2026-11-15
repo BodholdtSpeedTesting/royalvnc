@@ -1339,5 +1339,72 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 
 		XCTAssertEqual(sent(), [ "down 0xffeb", "down 0x70", "up 0xffeb", "up 0x70" ])
 	}
+
+	// MARK: A key let go of while Command is held (keyUpWithCommandHeld(_:isForThisView:))
+
+	/// What the monitor does with a key-up, as AppKit would hand it over: returned (nil when taken).
+	private func monitorUp(_ keyCode: UInt16, _ characters: String, ignoring: String,
+						   flags: NSEvent.ModifierFlags, isForThisView: Bool = true) -> NSEvent? {
+		view.keyUpWithCommandHeld(keyEvent(.keyUp, keyCode, characters, ignoring: ignoring, flags: flags),
+								  isForThisView: isForThisView)
+	}
+
+	func testWithoutItsKeyUpTheKeyOfACommandShortcutStaysHeld() {
+		// What AppKit leaves the view: Command-C, C let go of first, its key-up never reaching keyUp(with:). The C
+		// stays down on the server -- the stuck, repeating key a Linux server showed -- unless the monitor takes it.
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		flags(Key.command, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0xffe3" ])
+	}
+
+	func testTheMonitorLetsGoOfTheKeyOfACommandShortcut() {
+		// Command as Control: Control-C goes down and comes up whole, the C before the Control.
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		flags(Key.command, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		XCTAssertNil(monitorUp(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ]), "taken, so it goes no further")
+		flags(Key.command, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63", "up 0xffe3" ])
+
+		// With no mapping, Super-C, the same.
+		connection.modifierKeyCodeMapping = nil
+		flags(Key.command, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		XCTAssertNil(monitorUp(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ]))
+		flags(Key.command, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffeb", "down 0x63", "up 0x63", "up 0xffeb" ])
+
+		// The key is forgotten: pressed again, it is a new press, with no release of a key the server no longer holds.
+		down(Key.c, "c", ignoring: "c")
+		up(Key.c, "c", ignoring: "c")
+
+		XCTAssertEqual(sent(), [ "down 0x63", "up 0x63" ])
+	}
+
+	func testTheMonitorLeavesEveryOtherKeyUpAlone() {
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		flags(Key.command, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		_ = sent()
+
+		// Not this view's: another window's, or another view the first responder.
+		XCTAssertNotNil(monitorUp(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ], isForThisView: false))
+		// A key that never went down here: a menu's key equivalent took its key-down.
+		XCTAssertNotNil(monitorUp(Key.a, "a", ignoring: "a", flags: [ .command, .leftCommand ]))
+
+		XCTAssertEqual(sent(), [ ], "nothing sent for either")
+
+		// Command let go first: the key-up reaches keyUp(with:) as ever, and the monitor leaves it to it.
+		flags(Key.command, [ ])
+		XCTAssertNotNil(monitorUp(Key.c, "c", ignoring: "c", flags: [ ]))
+		up(Key.c, "c", ignoring: "c")
+
+		XCTAssertEqual(sent(), [ "up 0xffe3", "up 0x63" ])
+	}
 }
 #endif

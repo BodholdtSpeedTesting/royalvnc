@@ -118,6 +118,9 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	public override var acceptsFirstResponder: Bool { true }
 
 	private var displayLink: DisplayLink?
+	/// The local monitor that hands this view the key-ups AppKit keeps from its window
+	/// (`keyUpWithCommandHeld(_:isForThisView:)`), while the view is in a window.
+	private var keyUpMonitor: Any?
 	private var trackingArea: NSTrackingArea?
 	private var previousHotKeyMode: UnsafeMutableRawPointer?
     
@@ -215,12 +218,39 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 
 	deinit {
 		removeDisplayLink()
+		removeKeyUpMonitor()
 
 		deregisterHotKeys()
 	}
 
 	public override func viewDidMoveToWindow() {
 		addDisplayLink()
+
+		removeKeyUpMonitor()
+
+		if window != nil {
+			addKeyUpMonitor()
+		}
+	}
+
+	func addKeyUpMonitor() {
+		keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+			guard let self else { return event }
+
+			let isForThisView = event.window != nil
+				&& event.window === self.window
+				&& self.window?.firstResponder === self
+
+			return self.keyUpWithCommandHeld(event, isForThisView: isForThisView)
+		}
+	}
+
+	func removeKeyUpMonitor() {
+		guard let keyUpMonitor else { return }
+
+		NSEvent.removeMonitor(keyUpMonitor)
+
+		self.keyUpMonitor = nil
 	}
 
 	func removeDisplayLink() {
@@ -561,6 +591,33 @@ extension VNCCAFramebufferView {
 		for keyCode in keyCodes where !heldElsewhere(keyCode, by: event, on: connection) {
 			connection.keyUp(keyCode)
 		}
+	}
+
+	/// A key let go of while Command is held: AppKit does not dispatch its key-up to the window, so
+	/// `keyUp(with:)` never sees it, and a key this view sent down with Command held -- the C of
+	/// Command-C, which goes to the server as Control-C where the connection maps Command to Control --
+	/// would stay held on the server, which repeats it until the key is pressed again or the
+	/// connection ends. Seen with Bodholdt Viewer 1.2's candidate against the Bodholdt Linux server
+	/// (2026-11-15: X autorepeat typing "ccc...", the server's XTest keyboard holding the key until the
+	/// viewer disconnected), with the mapping and without it. So the view watches key-ups ahead of AppKit's
+	/// dispatch (a local monitor, `addKeyUpMonitor()`) and takes one itself where it is for this view
+	/// (its window's, the view the first responder: `isForThisView`), Command is held, and its key went
+	/// down here (`HeldKeyCodes.isHeld(_:)`): it lets go of the key as `handleKeyUp(with:)` does, and
+	/// returns nil, so that the event goes no further and is never handled twice. Any other key-up is
+	/// returned as it came: a key a menu's key equivalent took never went down here, and goes as before.
+	func keyUpWithCommandHeld(_ event: NSEvent,
+							  isForThisView: Bool) -> NSEvent? {
+		guard isForThisView,
+			  event.type == .keyUp,
+			  event.modifierFlags.contains(.command),
+			  let connection,
+			  connection.heldKeyCodes.isHeld(event.keyCode) else {
+			return event
+		}
+
+		handleKeyUp(with: event)
+
+		return nil
 	}
 
 	func handleFlagsChanged(with event: NSEvent) {

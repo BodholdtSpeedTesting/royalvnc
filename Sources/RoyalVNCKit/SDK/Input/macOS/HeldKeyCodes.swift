@@ -83,6 +83,11 @@ struct HeldKeyCodes {
 		sent.contains { $0.key != keyCode && $0.value.keys.contains(key) }
 	}
 
+	/// Whether `keyCode` went down here and has not been seen coming up.
+	func isHeld(_ keyCode: UInt16) -> Bool {
+		sent[keyCode] != nil
+	}
+
 	/// Whether every key seen going down has been seen coming up.
 	var isEmpty: Bool {
 		sent.isEmpty

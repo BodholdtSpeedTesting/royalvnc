@@ -108,6 +108,10 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	/// goes as it did before (`keyCodesFrom(event:)`).
 	private var lastKeyWasDeadKey = false
 
+	/// Whether the modifiers last seen were forgotten (`releaseHeldKeys()`) and no flags change has come since: the
+	/// next key-down first brings the server's modifiers to what its event says is held (`handleKeyDown(with:)`).
+	private var modifiersForgotten = false
+
 	/// What a key event's key types at its Shift and Caps Lock alone, with no dead key pending, which
 	/// tells its own character from what a pending dead key put in its `characters`: the current
 	/// layout's (`VNCKeyCode.charactersWithoutDeadKeys(of:)`). Tests, which may not select a layout,
@@ -267,9 +271,16 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	/// knows a key only by its KeyEvents (RFC 6143 §7.5.4), would hold it, and repeat it, until the connection
 	/// ended. A key still held when the view has the keyboard again goes down anew with its next press or
 	/// modifier change; a key-up of a key let go of here sends that key's up again, as a key-up never seen going
-	/// down always has (`handleKeyUp(with:)`).
+	/// down always has (`handleKeyUp(with:)`). A modifier held throughout, which no flags change will report, goes
+	/// down again ahead of the next key-down (`modifiersForgotten`), so that Command-as-Control held across a sheet
+	/// and then C is still Control-C.
+	///
+	/// The held keys are the connection's, not this view's: a view leaving its window while another view on the
+	/// same connection has the keyboard lets go of that view's keys too. The app puts one view on a connection, so
+	/// that needs it rebuilt mid-press; that view's next modifier change or key-down presses them again.
 	func releaseHeldKeys() {
 		lastModifierFlags = [ ]
+		modifiersForgotten = true
 
 		guard let connection else { return }
 
@@ -594,6 +605,11 @@ extension VNCCAFramebufferView {
 			return
 		}
 
+		if modifiersForgotten,
+		   event.type == .keyDown {
+			handleFlagsChanged(with: event)
+		}
+
 		let shift = event.modifierFlags.contains(.shift)
 			&& VNCKeyCode.isShiftSignificant(cgKeyCode: CGKeyCode(event.keyCode))
 
@@ -667,6 +683,8 @@ extension VNCCAFramebufferView {
 	}
 
 	func handleFlagsChanged(with event: NSEvent) {
+		modifiersForgotten = false
+
 		let currentFlags = event.modifierFlags
 		let lastFlags = lastModifierFlags
 

@@ -1456,9 +1456,29 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		XCTAssertEqual(sent(), [ ])
 	}
 
-	func testAKeyStillHeldWhenTheKeyboardComesBackGoesDownAnew() {
-		// Command held through the release and still held: its next change -- C pressed -- presses Control again first,
-		// since the flags last seen were forgotten. Without it, C would go down with no Control held on the server.
+	func testAModifierHeldThroughoutGoesDownAgainWithTheNextKey() {
+		// Command held through the release -- a sheet came and went -- and still held, with no flags change for it: the
+		// next key-down presses Control again first, from its own event's flags. Without it, C would go down plain.
+		holdCommandC()
+		view.releaseHeldKeys()
+		_ = sent()
+
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		up(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63", "up 0xffe3" ])
+
+		// Once only: the next key-down is a key-down as ever, its flags never compared.
+		down(Key.a, "a", ignoring: "a", flags: .shift)
+		up(Key.a, "a", ignoring: "a")
+
+		XCTAssertEqual(sent(), [ "down 0x61", "up 0x61" ])
+	}
+
+	func testAModifierPressedAgainAfterTheReleaseGoesDownOnce() {
+		// Command let go of and pressed again on the way back: its flags change presses Control, and the key-down after
+		// it adds nothing.
 		holdCommandC()
 		view.releaseHeldKeys()
 		_ = sent()
@@ -1488,6 +1508,8 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		XCTAssertNil(view.windowResignKeyObserver)
 
 		let window = windowForTheView()
+		// Out of the window whatever fails below, so that no monitor outlives the test.
+		addTeardownBlock { [view] in view?.removeFromSuperview() }
 
 		XCTAssertNotNil(view.keyUpMonitor)
 		XCTAssertNotNil(view.windowResignKeyObserver)

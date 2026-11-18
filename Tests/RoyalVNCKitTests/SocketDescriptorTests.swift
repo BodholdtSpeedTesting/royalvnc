@@ -13,6 +13,8 @@
 // itself, which holds a cancel there and gives the number it is about to shut down;
 // `SocketNetworkConnection.beforeDialingForTests`, which holds a dial as it begins; and `Socket`
 // itself. SocketCancelTests holds the rest, from outside.
+// The seams are DEBUG-only, as in the kit; in a Release build the five tests that use them skip, saying so, and
+// the rest run.
 
 import Foundation
 import Dispatch
@@ -31,9 +33,11 @@ import Android
 
 final class SocketDescriptorTests: XCTestCase {
 	override func tearDown() {
+#if DEBUG
 		Socket.beforeWaitingForTests = nil
 		Socket.beforeShuttingDownForTests = nil
 		SocketNetworkConnection.beforeDialingForTests = nil
+#endif
 
 		super.tearDown()
 	}
@@ -42,6 +46,7 @@ final class SocketDescriptorTests: XCTestCase {
 	/// leaves nothing connected: the socket the dial then makes is never connected, and the connection
 	/// stays cancelled.
 	func testACancelDuringTheDialConnectsNothing() throws {
+#if DEBUG
 		let server = try LoopbackServer()
 		let began = DispatchSemaphore(value: 0)
 		let letGo = DispatchSemaphore(value: 0)
@@ -76,10 +81,14 @@ final class SocketDescriptorTests: XCTestCase {
 		guard case .cancelled = connection.status else {
 			return XCTFail("cancelled, not \(connection.status)")
 		}
+#else
+		throw XCTSkip("Uses the kit's DEBUG-only test seams, which a Release build leaves out")
+#endif
 	}
 
 	/// A connection cancelled before it is started begins no dial at all: not even a socket is made.
 	func testAConnectionCancelledBeforeItStartsBeginsNoDial() throws {
+#if DEBUG
 		let began = Settled<Bool>()
 
 		SocketNetworkConnection.beforeDialingForTests = { began.settle(true) }
@@ -98,12 +107,16 @@ final class SocketDescriptorTests: XCTestCase {
 
 		XCTAssertEqual(returned.wait(timeout: .now() + 5), .success)
 		XCTAssertNil(began.value, "no dial began")
+#else
+		throw XCTSkip("Uses the kit's DEBUG-only test seams, which a Release build leaves out")
+#endif
 	}
 
 	/// A cancel while a read waits -- held as it is about to wait, so that it is still under way --
 	/// shuts the connection down at once, so the server is sent the end of the stream then, and leaves
 	/// the descriptor open while the read uses it; the read, let go, returns cancelled and closes it.
 	func testACancelLeavesTheDescriptorToTheCallStillUsingIt() throws {
+#if DEBUG
 		let server = try LoopbackServer()
 		let connection = SocketNetworkConnection(settings: NetworkConnectionSettings(connectionTimeout: 15,
 																					 host: "127.0.0.1",
@@ -163,6 +176,9 @@ final class SocketDescriptorTests: XCTestCase {
 		XCTAssertTrue(holds(within: 2) { reading.value != nil }, "the read returns")
 		XCTAssertEqual(reading.value, "cancelled")
 		XCTAssertTrue(holds(within: 1) { !LoopbackServer.isOpen(number) }, "and the descriptor is closed as it does")
+#else
+		throw XCTSkip("Uses the kit's DEBUG-only test seams, which a Release build leaves out")
+#endif
 	}
 
 	/// The cancel's shutdown uses the descriptor as a call does, and is counted so until it is made: a
@@ -177,6 +193,7 @@ final class SocketDescriptorTests: XCTestCase {
 	/// shutdown's own first step, so it sees the descriptor as the shutdown uses it, whatever the order
 	/// of the cancel's steps. The cancel is made on another thread, as it waits in the seam.
 	func testTheCancelsShutdownHoldsTheDescriptorAgainstTheLastCallOut() throws {
+#if DEBUG
 		let server = try LoopbackServer()
 		let connection = SocketNetworkConnection(settings: NetworkConnectionSettings(connectionTimeout: 15,
 																					 host: "127.0.0.1",
@@ -247,6 +264,9 @@ final class SocketDescriptorTests: XCTestCase {
 		XCTAssertEqual(cancelReturned.wait(timeout: .now() + 5), .success, "the cancel returns")
 		XCTAssertTrue(holds(within: 1) { !LoopbackServer.isOpen(number) }, "and the descriptor is closed once the shutdown is made")
 		XCTAssertTrue(taken.sawTheEnd(within: 2), "the server sent the end of the stream")
+#else
+		throw XCTSkip("Uses the kit's DEBUG-only test seams, which a Release build leaves out")
+#endif
 	}
 
 	/// The same with no call under way, where the cancel is the descriptor's only user, and so the one
@@ -255,6 +275,7 @@ final class SocketDescriptorTests: XCTestCase {
 	/// descriptor first, and shut down a number closed -- by then perhaps another socket's.) On every
 	/// platform.
 	func testTheCancelsShutdownIsMadeOfTheOpenDescriptorWithNoCallUnderWay() throws {
+#if DEBUG
 		let server = try LoopbackServer()
 		let socket = try Socket(addressInfo: AddressInfo(host: "127.0.0.1", port: server.port))
 
@@ -284,6 +305,9 @@ final class SocketDescriptorTests: XCTestCase {
 		XCTAssertEqual(seen, [true, true], "at the shutdown, the descriptor open and still this connection's")
 		XCTAssertFalse(LoopbackServer.isOpen(number), "and closed once the shutdown is made")
 		XCTAssertTrue(taken.sawTheEnd(within: 2), "the server sent the end of the stream")
+#else
+		throw XCTSkip("Uses the kit's DEBUG-only test seams, which a Release build leaves out")
+#endif
 	}
 
 #if !canImport(WinSDK)

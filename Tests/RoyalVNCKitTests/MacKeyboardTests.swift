@@ -1465,15 +1465,16 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 
 		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
 		up(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63" ])
+
+		// Once only: the next key-down is a key-down as ever, its flags never compared. Its event says Shift is held too,
+		// with no flags change for it -- which a second catch-up would press (0xffe1); none does.
+		down(Key.a, "a", ignoring: "a", flags: [ .command, .leftCommand, .shift, .leftShift ])
+		up(Key.a, "a", ignoring: "a", flags: [ .command, .leftCommand, .shift, .leftShift ])
 		flags(Key.command, [ ])
 
-		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63", "up 0xffe3" ])
-
-		// Once only: the next key-down is a key-down as ever, its flags never compared.
-		down(Key.a, "a", ignoring: "a", flags: .shift)
-		up(Key.a, "a", ignoring: "a")
-
-		XCTAssertEqual(sent(), [ "down 0x61", "up 0x61" ])
+		XCTAssertEqual(sent(), [ "down 0x61", "up 0x61", "up 0xffe3" ])
 	}
 
 	func testAModifierPressedAgainAfterTheReleaseGoesDownOnce() {

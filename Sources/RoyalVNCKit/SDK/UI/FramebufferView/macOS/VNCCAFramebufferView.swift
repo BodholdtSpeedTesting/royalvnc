@@ -683,6 +683,7 @@ extension VNCCAFramebufferView {
 	}
 
 	func handleFlagsChanged(with event: NSEvent) {
+		// Before the events below: each goes through handleKeyDown(with:), which would otherwise catch up again.
 		modifiersForgotten = false
 
 		let currentFlags = event.modifierFlags

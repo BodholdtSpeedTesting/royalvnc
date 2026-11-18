@@ -441,6 +441,26 @@ final class MacKeyCharactersWithoutDeadKeysTests: XCTestCase {
 final class HeldKeyCodesTests: XCTestCase {
 	private let lowerA = [ VNCKeyCode(0x61) ], upperA = [ VNCKeyCode(0x41) ]
 
+	func testReleasingAllLetsGoOfEachKeyOnceTheModifiersLastAndForgetsThem() {
+		var held = HeldKeyCodes()
+		let control = [ VNCKeyCode(0xffe3) ]
+
+		// Control, and Command mapped to it: one keysym for two keys. Then C, A and F5, whose key code (0x60) is above
+		// both modifiers' (0x3b, 0x37), so that the order is the modifiers' last and not the key codes' alone.
+		_ = held.keyDown(Key.control, isARepeat: false, shift: false) { control }
+		_ = held.keyDown(Key.command, isARepeat: false, shift: false) { control }
+		_ = held.keyDown(Key.c, isARepeat: false, shift: false) { [ VNCKeyCode(0x63) ] }
+		_ = held.keyDown(Key.a, isARepeat: false, shift: false) { self.lowerA }
+		_ = held.keyDown(Key.f5, isARepeat: false, shift: false) { [ VNCKeyCode(0xffc2) ] }
+
+		XCTAssertEqual(held.releaseAll().map(\.rawValue), [ 0x61, 0x63, 0xffc2, 0xffe3 ],
+					   "each once, by key code, the modifier after the keys it was held for")
+		XCTAssertTrue(held.isEmpty)
+		XCTAssertFalse(held.isHeld(Key.c))
+		XCTAssertEqual(held.releaseAll(), [ ], "nothing left to let go of")
+		XCTAssertEqual(held.keyUp(Key.c) { self.lowerA }, lowerA, "a later key-up is one never seen going down")
+	}
+
 	func testAKeyComesUpAsItWentDownAndIsForgotten() {
 		var held = HeldKeyCodes()
 
@@ -1405,6 +1425,110 @@ final class MacFramebufferViewKeyboardTests: XCTestCase {
 		up(Key.c, "c", ignoring: "c")
 
 		XCTAssertEqual(sent(), [ "up 0xffe3", "up 0x63" ])
+	}
+
+	// MARK: Keys held when the view stops having the keyboard (releaseHeldKeys())
+
+	/// Command as Control held, and C with it: Control-C down on the server.
+	private func holdCommandC() {
+		connection.modifierKeyCodeMapping = Self.commandAsControl
+		flags(Key.command, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63" ])
+	}
+
+	func testResigningFirstResponderLetsGoOfEveryHeldKey() {
+		holdCommandC()
+
+		XCTAssertTrue(view.resignFirstResponder())
+		XCTAssertEqual(sent(), [ "up 0x63", "up 0xffe3" ], "the C, then the Control")
+
+		// Command let go of while the view had not the keyboard, and no flags change for it came: the next change sends
+		// only what changed since the release -- Shift down -- and no second Control up.
+		flags(Key.shift, [ .shift, .leftShift ])
+		flags(Key.shift, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe1", "up 0xffe1" ])
+
+		// Nothing held: resigning again sends nothing.
+		XCTAssertTrue(view.resignFirstResponder())
+		XCTAssertEqual(sent(), [ ])
+	}
+
+	func testAKeyStillHeldWhenTheKeyboardComesBackGoesDownAnew() {
+		// Command held through the release and still held: its next change -- C pressed -- presses Control again first,
+		// since the flags last seen were forgotten. Without it, C would go down with no Control held on the server.
+		holdCommandC()
+		view.releaseHeldKeys()
+		_ = sent()
+
+		flags(Key.command, [ .command, .leftCommand ])
+		down(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		up(Key.c, "c", ignoring: "c", flags: [ .command, .leftCommand ])
+		flags(Key.command, [ ])
+
+		XCTAssertEqual(sent(), [ "down 0xffe3", "down 0x63", "up 0x63", "up 0xffe3" ])
+	}
+
+	/// The view in a window of its own, never shown: no window is ordered in, so nothing appears on screen.
+	private func windowForTheView() -> NSWindow {
+		let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 8, height: 8),
+							  styleMask: [ .titled ],
+							  backing: .buffered,
+							  defer: true)
+		window.isReleasedWhenClosed = false
+		window.contentView?.addSubview(view)
+
+		return window
+	}
+
+	func testInAWindowTheViewWatchesItsKeyUpsAndItsWindowAndOutOfOneItDoesNot() {
+		XCTAssertNil(view.keyUpMonitor, "no window yet")
+		XCTAssertNil(view.windowResignKeyObserver)
+
+		let window = windowForTheView()
+
+		XCTAssertNotNil(view.keyUpMonitor)
+		XCTAssertNotNil(view.windowResignKeyObserver)
+
+		// Its window's key status, and no other window's, lets go of the keys.
+		holdCommandC()
+		let other = NSWindow(contentRect: .init(x: 0, y: 0, width: 8, height: 8), styleMask: [ .titled ],
+							 backing: .buffered, defer: true)
+		other.isReleasedWhenClosed = false
+		NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: other)
+		XCTAssertEqual(sent(), [ ], "another window's")
+
+		NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+		XCTAssertEqual(sent(), [ "up 0x63", "up 0xffe3" ])
+
+		// Out of the window: both gone, and the keys held then let go of.
+		down(Key.a, "a", ignoring: "a")
+		_ = sent()
+		view.removeFromSuperview()
+
+		XCTAssertNil(view.keyUpMonitor)
+		XCTAssertNil(view.windowResignKeyObserver)
+		XCTAssertEqual(sent(), [ "up 0x61" ])
+
+		// And no longer told of the window it left.
+		down(Key.a, "a", ignoring: "a")
+		_ = sent()
+		NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+		XCTAssertEqual(sent(), [ ])
+
+		// Back in a window, watched again, once: a second move in replaces the first monitor, never adds a second.
+		window.contentView?.addSubview(view)
+		let first = view.keyUpMonitor.map { ObjectIdentifier($0 as AnyObject) }
+		view.viewDidMoveToWindow()
+
+		XCTAssertNotNil(first)
+		XCTAssertNotEqual(view.keyUpMonitor.map { ObjectIdentifier($0 as AnyObject) }, first)
+		XCTAssertNotNil(view.windowResignKeyObserver)
+
+		view.removeFromSuperview()
+		_ = sent()
 	}
 }
 #endif

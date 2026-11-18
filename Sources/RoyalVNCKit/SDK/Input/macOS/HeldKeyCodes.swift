@@ -92,5 +92,24 @@ struct HeldKeyCodes {
 	var isEmpty: Bool {
 		sent.isEmpty
 	}
+
+	/// Every key held here is forgotten; returns the keys to let go of, each once (two keys send one keysym
+	/// where a modifier is mapped to another), in the order a hand lets go: the keys a modifier was held for,
+	/// then the modifiers (X's modifier keysyms, XK_Shift_L 0xffe1 to XK_Hyper_R 0xffee), each by its Mac key
+	/// code. For a view that is no longer where the keys' key-ups will go (VNCCAFramebufferView's
+	/// `releaseHeldKeys()`).
+	mutating func releaseAll() -> [VNCKeyCode] {
+		let isModifier = { (key: VNCKeyCode) in (0xffe1...0xffee).contains(key.rawValue) }
+		let held = sent.sorted { $0.key < $1.key }.flatMap(\.value.keys)
+		var released = [VNCKeyCode]()
+
+		for key in held.filter({ !isModifier($0) }) + held.filter(isModifier) where !released.contains(key) {
+			released.append(key)
+		}
+
+		sent.removeAll()
+
+		return released
+	}
 }
 #endif

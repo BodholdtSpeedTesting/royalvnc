@@ -120,7 +120,10 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	private var displayLink: DisplayLink?
 	/// The local monitor that hands this view the key-ups AppKit keeps from its window
 	/// (`keyUpWithCommandHeld(_:isForThisView:)`), while the view is in a window.
-	private var keyUpMonitor: Any?
+	private(set) var keyUpMonitor: Any?
+	/// The observer of the view's window ceasing to be the key window (`releaseHeldKeys()`), while the view is in
+	/// a window.
+	private(set) var windowResignKeyObserver: NSObjectProtocol?
 	private var trackingArea: NSTrackingArea?
 	private var previousHotKeyMode: UnsafeMutableRawPointer?
     
@@ -219,6 +222,7 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	deinit {
 		removeDisplayLink()
 		removeKeyUpMonitor()
+		removeWindowResignKeyObserver()
 
 		deregisterHotKeys()
 	}
@@ -227,9 +231,50 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 		addDisplayLink()
 
 		removeKeyUpMonitor()
+		removeWindowResignKeyObserver()
 
-		if window != nil {
+		if let window {
 			addKeyUpMonitor()
+			addWindowResignKeyObserver(for: window)
+		} else {
+			releaseHeldKeys()
+		}
+	}
+
+	func addWindowResignKeyObserver(for window: NSWindow) {
+		windowResignKeyObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification,
+																		 object: window,
+																		 queue: .main) { [weak self] _ in
+			MainActor.assumeIsolated {
+				self?.releaseHeldKeys()
+			}
+		}
+	}
+
+	func removeWindowResignKeyObserver() {
+		guard let windowResignKeyObserver else { return }
+
+		NotificationCenter.default.removeObserver(windowResignKeyObserver)
+
+		self.windowResignKeyObserver = nil
+	}
+
+	/// Lets go of every key this connection's views saw go down and have not seen come up, as each went down
+	/// (`HeldKeyCodes.releaseAll()`), and forgets the modifiers last seen held: the view is no longer where those
+	/// keys' key-ups will go. It stopped being the first responder, its window stopped being the key window --
+	/// Command-Tab or a click in another application, a sheet or another window put in front, Command-W -- or it
+	/// left its window; and a key let go of then comes up in whatever has the keyboard now, so the server, which
+	/// knows a key only by its KeyEvents (RFC 6143 §7.5.4), would hold it, and repeat it, until the connection
+	/// ended. A key still held when the view has the keyboard again goes down anew with its next press or
+	/// modifier change; a key-up of a key let go of here sends that key's up again, as a key-up never seen going
+	/// down always has (`handleKeyUp(with:)`).
+	func releaseHeldKeys() {
+		lastModifierFlags = [ ]
+
+		guard let connection else { return }
+
+		for keyCode in connection.heldKeyCodes.releaseAll() {
+			connection.keyUp(keyCode)
 		}
 	}
 
@@ -309,6 +354,7 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 
 	public override func resignFirstResponder() -> Bool {
         deregisterHotKeys()
+		releaseHeldKeys()
 
         return true
     }

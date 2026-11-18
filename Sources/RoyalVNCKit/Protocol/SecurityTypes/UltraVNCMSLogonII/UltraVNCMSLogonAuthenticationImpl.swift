@@ -4,8 +4,6 @@ import FoundationEssentials
 import Foundation
 #endif
 
-@_implementationOnly import d3des
-
 extension VNCProtocol.UltraVNCMSLogonIIAuthentication {
 	struct Authentication {
         let encryptedCredential: Data
@@ -74,90 +72,49 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.Authentication {
         return data
     }
 
+	/// `string`, capped or zero-padded to `length` bytes (a multiple of eight), encrypted as MS-Logon II sends each of its
+	/// credential's fields: DES in CBC mode, the first block XORed with the key itself, each later one with the ciphertext
+	/// before it, under the key as VNC gives it to DES (`DES.vncKey`). As d3des's deskey/des chain did, measured against it
+	/// and against OpenSSL's DES-CBC (IV the key, the key's bits reversed): DESTests. No state is kept between calls, so two
+	/// connections authenticating at once cannot re-key each other.
 	static func encrypt(string: String,
 						length: Int,
 						key: Data) -> Data? {
-		guard var stringData = Self.cappedOrPaddedStringData(string: string,
+		guard let stringData = Self.cappedOrPaddedStringData(string: string,
 															 length: length),
-			  stringData.count == length else {
+			  stringData.count == length,
+			  length % 8 == 0,
+			  key.count == 8 else {
 			return nil
 		}
 
-		var mutableKey = key
+		let keyBytes = [UInt8](key)
+		let desKey = DES.vncKey(keyBytes)
+		let plain = [UInt8](stringData)
 
-		let success = mutableKey.withUnsafeMutableBytes { keyBufferPtr in
-			guard let keyPtr = keyBufferPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-				return false
-			}
+		var encrypted = [UInt8]()
+		encrypted.reserveCapacity(length)
 
-			let encryptSuccess = stringData.withUnsafeMutableBytes { stringDataBufferPtr in
-				guard let stringDataPtr = stringDataBufferPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-					return false
-				}
+		var previous = keyBytes
 
-				encryptD3DES(target: stringDataPtr,
-							 length: length,
-							 key: keyPtr)
+		for offset in stride(from: 0, to: length, by: 8) {
+			let block = zip(plain[offset..<offset + 8], previous).map { $0 ^ $1 }
 
-				return true
-			}
-
-			return encryptSuccess
+			previous = DES.encryptBlock(block, key: desKey)
+			encrypted += previous
 		}
 
-		guard success else {
-			return nil
-		}
-
-		return stringData
+		return Data(encrypted)
 	}
+}
 
-	static func encryptD3DES(target: UnsafeMutablePointer<UInt8>,
-							 length: Int,
-							 key: UnsafeMutablePointer<UInt8>) {
-		// The whole chain, not each block. `encryptDES` calls `deskey` every
-		// time it is entered, so locking inside it would still let another
-		// thread re-key between this credential's blocks -- which is exactly
-		// the corruption being fixed. See `D3DESKeySchedule`.
-		D3DESKeySchedule.withExclusiveUse {
-			encryptD3DESLocked(target: target, length: length, key: key)
-		}
-	}
-
-	private static func encryptD3DESLocked(target: UnsafeMutablePointer<UInt8>,
-										   length: Int,
-										   key: UnsafeMutablePointer<UInt8>) {
-		for idx in 0..<8 {
-			target[idx] ^= key[idx]
-		}
-
-		encryptDES(target: target,
-				   key: key,
-				   source: target,
-				   sourceLength: 8)
-
-		for idx in stride(from: 8, to: length, by: 8) {
-			for idxJ in 0..<8 {
-				target[idx + idxJ] ^= target[idx + idxJ - 8]
-			}
-
-			encryptDES(target: target + idx,
-					   key: key,
-					   source: target + idx,
-					   sourceLength: 8)
-		}
-	}
-
-	static func encryptDES(target: UnsafeMutablePointer<UInt8>,
-						   key: UnsafeMutablePointer<UInt8>,
-						   source: UnsafeMutablePointer<UInt8>,
-						   sourceLength: Int) {
-		deskey(key, EN0)
-
-		let eightByteBlocks = sourceLength / 8
-
-		for idx in 0..<eightByteBlocks {
-			des(source + idx * 8, target + idx * 8)
-		}
+extension VNCProtocol.UltraVNCMSLogonIIAuthentication.Authentication {
+	/// One of the credential's two fields, `string` capped or zero-padded to `length` bytes and encrypted under the key
+	/// agreement's secret `key`: what `init?(agreement:username:password:)` sends, given a key a test can choose (the
+	/// agreement's is random).
+	static func encryptedField(_ string: String,
+							   length: Int,
+							   key: Data) -> Data? {
+		encrypt(string: string, length: length, key: key)
 	}
 }

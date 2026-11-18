@@ -37,7 +37,7 @@ done
 swiftc -sanitize=fuzzer,address -enable-testing -parse-as-library \
 	$([ "$CONFIG" = release ] && echo -O || echo -Onone) \
 	-I "$BIN/Modules" -I "$BIN" "${MODULE_MAPS[@]}" \
-	-I Sources/RoyalVNCKitC/include -I Sources/d3des/include -I Sources/Z/include \
+	-I Sources/RoyalVNCKitC/include -I Sources/Z/include \
 	Tools/fuzz/ServerToClientFuzzEntry.swift \
 	Tests/RoyalVNCKitTests/ScriptedReader.swift \
 	Tests/RoyalVNCKitTests/ServerToClientFuzzer.swift \

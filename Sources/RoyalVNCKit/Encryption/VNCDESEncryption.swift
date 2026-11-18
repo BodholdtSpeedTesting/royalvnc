@@ -4,8 +4,6 @@ import FoundationEssentials
 import Foundation
 #endif
 
-@_implementationOnly import d3des
-
 struct VNCDESEncryption {
 	static func encrypt(data: Data,
 						key: String) -> Data? {
@@ -26,24 +24,15 @@ struct VNCDESEncryption {
 private extension VNCDESEncryption {
 	static func encrypt(data: inout Data,
 						paddedKey: inout Data) -> Bool {
-		let success = data.withUnsafeMutableBytes { encryptedDataPtr in
-			guard let encryptedDataBytes = encryptedDataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-				return false
-			}
-
-			return paddedKey.withUnsafeMutableBytes { paddedKeyPtr in
-				guard let paddedKeyBytes = paddedKeyPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-					return false
-				}
-
-				encrypt(dataBytes: encryptedDataBytes,
-						paddedKeyBytes: paddedKeyBytes)
-
-				return true
-			}
+		// RFC 6143 §7.2.2: each eight bytes of the challenge encrypted independently (ECB), under the password's key.
+		guard data.count % 8 == 0,
+			  paddedKey.count == 8 else {
+			return false
 		}
 
-		return success
+		data = Data(DES.encryptECB([UInt8](data), key: DES.vncKey([UInt8](paddedKey))))
+
+		return true
 	}
 
 	static func paddedKey(_ key: String) -> Data {
@@ -67,22 +56,5 @@ private extension VNCDESEncryption {
 		}
 
 		return paddedKey
-	}
-
-	static func encrypt(dataBytes: UnsafeMutablePointer<UInt8>,
-						paddedKeyBytes: UnsafeMutablePointer<UInt8>) {
-		let challengeSize = 16
-
-		// `deskey` and `des` share a global schedule, so they have to be held
-		// together. See `D3DESKeySchedule`.
-		D3DESKeySchedule.withExclusiveUse {
-			deskey(paddedKeyBytes, EN0)
-
-			for challengeIdx in stride(from: 0, to: challengeSize, by: 8) {
-				let bytesAtOffset = dataBytes.advanced(by: challengeIdx)
-
-				des(bytesAtOffset, bytesAtOffset)
-			}
-		}
 	}
 }

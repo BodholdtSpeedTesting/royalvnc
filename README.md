@@ -4,7 +4,7 @@
 
 RoyalVNC is a modern, high performance implementation of the [VNC/RFB protocol](https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst) written in Swift.
 The SDK (RoyalVNCKit) is compatible with Swift, Objective-C, C and C# on macOS, iOS, iPadOS, Linux and Windows.
-It depends on [CryptoSwift](https://github.com/krzyzanowskim/CryptoSwift), [zlib](https://github.com/madler/zlib) and D3DES (see [Credits](#Credits)).
+It depends on [CryptoSwift](https://github.com/krzyzanowskim/CryptoSwift) and [zlib](https://github.com/madler/zlib) (see [Credits](#Credits)). Its DES, for VNC Authentication and MS-Logon II, is its own (Sources/RoyalVNCKit/Encryption/DES.swift), written from FIPS 46-3.
 
 ## Supported Features
 
@@ -60,4 +60,3 @@ See [Usage](USAGE.md).
 - [zlib](https://github.com/madler/zlib) ([zlib license](https://github.com/madler/zlib/blob/develop/LICENSE))
 - [Swift JPEG](https://github.com/tayloraswift/swift-jpeg) ([Apache License 2.0](https://github.com/tayloraswift/swift-jpeg/blob/master/LICENSE))
 - [Swift PNG](https://github.com/tayloraswift/swift-png) ([Apache License 2.0](https://github.com/tayloraswift/swift-png/blob/master/LICENSE))
-- D3DES (Public Domain, Copyright Richard Outerbridge)

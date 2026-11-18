@@ -23,8 +23,6 @@ zTarget = Target.target(name: "Z", linkerSettings: [
 ])
 #endif
 
-let d3desTarget = Target.target(name: "d3des")
-
 let package = Package(
     name: "RoyalVNCKit",
 
@@ -75,7 +73,6 @@ let package = Package(
 
             dependencies: [
                 "RoyalVNCKitC",
-                .byName(name: d3desTarget.name),
                 .byName(name: zTarget.name),
                 .byName(name: "CryptoSwift"),
                 .product(name: "JPEG", package: "swift-jpeg", condition: .when(platforms: [ .linux, .windows, .android ])),
@@ -91,7 +88,6 @@ let package = Package(
             ]
         ),
 
-        d3desTarget,
         zTarget,
 
         .executableTarget(

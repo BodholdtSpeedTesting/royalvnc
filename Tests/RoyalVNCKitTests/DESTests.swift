@@ -87,6 +87,36 @@ final class DESTests: XCTestCase {
 		(2, "\u{70}\u{e4}\u{73}\u{73}\u{77}\u{f6}\u{72}\u{64}", 64, "0c0f4457e0cabab3c9c8b890305a6f90a021b81030d609a50d8685f13c812f9b06673709c9aec11b2fac50132287ec298b98c1be0a112a17a0c96729d1c8f7ed")
 	]
 
+	/// Edges the recorded inputs leave out, from OpenSSL 3.6.4's DES (which gave all 43 recordings above): a password
+	/// whose eighth byte is the first of a two-byte character, cut there; and fields longer than their length, capped.
+	/// The key and capping code is the kit's unchanged, so these hold what DES makes of them.
+	private static let vncEdgeVectors: [(String, Int, String)] = [
+		("1234567\u{e9}", 0, "8d22521983ab9cbcf6181de628f58d12"),
+		("1234567\u{e9}", 1, "d2f00c80e5f647c3d2f00c80e5f647c3"),
+		("1234567\u{e9}", 2, "142366ec8cfb7aa5142366ec8cfb7aa5"),
+		("1234567\u{e9}", 3, "d971d9a36d669698595cceef58153b8d"),
+	]
+
+	/// (field, field length, encrypted field) under `keys[0]`.
+	private static let msLogonEdgeVectors: [(String, Int, String)] = [
+		(String(repeating: "abcdefghij", count: 30), 256, "f09bd964af2776a4cb234e28d6bfa639a485f5856f50ee5f943ff492f522508dff8210d7f48fb2df966d4a6802f0ef471a8b1648ef62ea1fee15f896fb706cc642892dfca1acf97851177b8ba5a7da209ce96948194303bc7d0d9a45be1348177cbb1d8eb9563aa6a28b9aa54042a9c3d315e72de4a93fef424c07172ca68417812fcedc4fada25fca242248c50a783b1cf398faf42e3f9146c15b50ec9422cfb255357c696a9008c138b04edb43bdadba0e3f3d217ea3cbce448d3543c587e6a0eca203c563d0f2207c3ecc9d904649e172d0e451386c6b86bc1a8bc9d0d69f6ffc3be5b165aba3ca98c36338c507dcb39e75e7bbabc8acd351368fd9e12e79"),
+		(String(repeating: "p", count: 70), 64, "47fcb712a8a80a6e3761567e896512c9ef04ad34114970764459f8f27fcc6d2727486296980aafbb2da84dd8215c207980baad15fe27e7af467238278fc3910a"),
+	]
+
+	func testEdgesTheRecordingsLeaveOut() {
+		for (password, challenge, response) in Self.vncEdgeVectors {
+			XCTAssertEqual(VNCDESEncryption.encrypt(data: Self.challenges[challenge], key: password).map { Self.hex([UInt8]($0)) },
+						   response, "password \(password.debugDescription), challenge \(challenge)")
+		}
+
+		for (field, length, encrypted) in Self.msLogonEdgeVectors {
+			let made = VNCProtocol.UltraVNCMSLogonIIAuthentication.Authentication.encryptedField(field, length: length,
+																								 key: Self.keys[0])
+
+			XCTAssertEqual(made.map { Self.hex([UInt8]($0)) }, encrypted, "a \(field.utf8.count)-byte field in \(length)")
+		}
+	}
+
 	func testTheStandardsKnownAnswer() {
 		// Key 133457799BBCDFF1, plaintext 0123456789ABCDEF: 85E813540F0AB405 (OpenSSL's DES-ECB agrees).
 		XCTAssertEqual(Self.hex(DES.encryptBlock(Self.bytes("0123456789abcdef"), key: Self.bytes("133457799bbcdff1"))),

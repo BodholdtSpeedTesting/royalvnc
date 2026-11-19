@@ -158,6 +158,34 @@ public final class VNCConnection: NSObjectOrAnyObject {
 		}
 	}
 
+	/// Whether ``securityTypeChooser``'s answer is the only one.
+	///
+	/// `false`, the default: a `nil` answer, or a type the server did not offer,
+	/// falls back to the built-in order, and on RFB 3.3 the type the server
+	/// states is used without asking.
+	///
+	/// `true`: the connection fails with
+	/// ``VNCError/AuthenticationError/clientCouldNotDecideOnSecurityType``
+	/// instead of falling back -- and on RFB 3.3 the chooser is asked about the
+	/// one type the server states, and the connection fails, before any
+	/// authentication, unless it answers with that type.
+	///
+	/// WHY. An embedder that must not connect without a property only one type
+	/// gives -- encryption, which only VeNCrypt gives here -- cannot otherwise
+	/// say so: the built-in order would take another type the moment the one it
+	/// needs is missing, and a 3.3 server picks for it, so its password could go
+	/// out under MS-Logon II before the embedder learned which type was used.
+	/// Failing before authentication is the only point at which nothing has
+	/// been sent.
+	///
+	/// Must be set before `connect()`.
+	public var securityTypeChooserIsFinal = false {
+		didSet {
+			precondition(!hasCreatedConnection,
+						 "securityTypeChooserIsFinal must be set before connect()")
+		}
+	}
+
 	/// The security type this connection actually used, once it is settled.
 	///
 	/// `nil` until the type is agreed. Readable from any thread, and guarded,

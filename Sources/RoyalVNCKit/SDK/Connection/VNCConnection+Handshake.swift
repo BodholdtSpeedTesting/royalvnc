@@ -103,6 +103,17 @@ private extension VNCConnection {
 			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
 		}
 
+		// The server has chosen, and the client cannot answer it (RFC 6143 7.1.2,
+		// version 3.3); but an embedder whose choice is final can still decline,
+		// by closing before authentication, which is before anything of its
+		// credentials is sent.
+		if securityTypeChooserIsFinal, let chooser = securityTypeChooser {
+			guard let stated = securityType.publicSecurityMethod,
+				  chooser([stated]) == stated else {
+				throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
+			}
+		}
+
 		// `announceChoice: false`: the client never sends a security type in 3.3,
 		// and sending one would put a stray byte in front of the authentication
 		// exchange — which the server would read as the first byte of a challenge
@@ -171,6 +182,14 @@ private extension VNCConnection {
 				try await sendAuthenticationData(securityType: preferred.protocolSecurityType)
 
 				return
+			}
+
+			// No fallback when the embedder's answer is final: nothing has been
+			// sent yet, and closing here is how a 3.7 or 3.8 client declines
+			// every type offered (RFC 6143 7.1.2 gives the client no "none of
+			// these" message).
+			if securityTypeChooserIsFinal {
+				throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
 			}
 		}
 
